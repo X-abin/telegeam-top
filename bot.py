@@ -191,8 +191,20 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
 def admin_keyboard():
     return {
         "keyboard": [
-            [{"text": "创建批次"}, {"text": "批次列表"}],
-            [{"text": "最近领取记录"}, {"text": "取消操作"}],
+            [{"text": "创建兑换码批次"}, {"text": "批次列表"}],
+            [{"text": "核心流程"}, {"text": "最近领取记录"}],
+            [{"text": "取消操作"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+def batch_type_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "使用次数"}, {"text": "领完为止"}],
+            [{"text": "取消操作"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -267,6 +279,7 @@ def configure_bot_menu():
         {"command": "batches", "description": "查看批次列表"},
         {"command": "batch", "description": "查看批次详情"},
         {"command": "records", "description": "查看最近领取记录"},
+        {"command": "flow", "description": "查看核心流程"},
     ]
     api_call("deleteWebhook", {"drop_pending_updates": "false"})
     api_call("setMyCommands", {"commands": json.dumps(user_commands, ensure_ascii=False)})
@@ -286,17 +299,44 @@ def handle_admin(chat_id, user_id):
         return
     send_message(
         chat_id,
-        "管理员面板：\n\n"
-        "创建批次：创建兑换码批次并生成专属领取链接\n"
-        "批次列表：查看最近批次\n"
-        "最近领取记录：查看领取日志",
+        "管理员面板\n\n"
+        "核心流程：创建批次 → 导入兑换码 → 生成领取链接 → 分享链接 → 用户验证 → 自动发码 → 记录日志\n\n"
+        "请从下方按钮开始：",
+        admin_keyboard(),
+    )
+
+
+def handle_flow(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, "你不是管理员。")
+        return
+    send_message(
+        chat_id,
+        "核心流程\n\n"
+        "1. 管理员点击「创建兑换码批次」\n"
+        "2. 填写批次名称\n"
+        "3. 选择兑换码类型：使用次数 / 领完为止\n"
+        "4. 按提示导入兑换码\n"
+        "5. Bot 自动生成唯一领取链接\n"
+        "6. 管理员复制链接，发到频道、群聊或私聊\n"
+        "7. 用户只能通过这个链接进入领取\n"
+        "8. 用户点击一次验证按钮\n"
+        "9. 系统校验资格并自动发放兑换码\n"
+        "10. 系统记录领取日志，管理员可查看\n\n"
+        "普通用户没有领取菜单，也不能靠命令主动领取。",
         admin_keyboard(),
     )
 
 
 def begin_new_batch(chat_id, user_id):
     ADMIN_STATES[user_id] = {"action": "newbatch", "step": "name", "data": {}}
-    send_message(chat_id, "请输入批次名称：", admin_keyboard())
+    send_message(
+        chat_id,
+        "创建批次：第 1 步 / 共 4 步\n\n"
+        "请先输入批次名称。\n\n"
+        "例如：7 月新用户福利、频道活动兑换码、测试批次",
+        admin_keyboard(),
+    )
 
 
 def finish_usage_batch(chat_id, user_id, state, text):
@@ -327,11 +367,12 @@ def finish_usage_batch(chat_id, user_id, state, text):
     ADMIN_STATES.pop(user_id, None)
     send_message(
         chat_id,
-        "批次创建完成。\n\n"
+        "批次创建完成，专属领取链接已生成。\n\n"
         "批次名称：{0}\n"
         "类型：使用次数\n"
         "可用次数：{1}\n"
-        "领取链接：\n{2}".format(
+        "领取链接：\n{2}\n\n"
+        "下一步：复制这条链接发给用户。用户只能通过这条链接领取，领取前需要点击一次验证按钮。".format(
             html.escape(state["data"]["name"]),
             usage_limit,
             create_batch_link(token),
@@ -373,12 +414,13 @@ def finish_unique_batch(chat_id, user_id, state, text):
     ADMIN_STATES.pop(user_id, None)
     send_message(
         chat_id,
-        "批次创建完成。\n\n"
+        "批次创建完成，专属领取链接已生成。\n\n"
         "批次名称：{0}\n"
         "类型：领完为止\n"
         "导入数量：{1}\n"
         "重复跳过：{2}\n"
-        "领取链接：\n{3}".format(
+        "领取链接：\n{3}\n\n"
+        "下一步：复制这条链接发给用户。每个兑换码只会发放一次，领完后自动停止。".format(
             html.escape(state["data"]["name"]),
             len(codes),
             duplicated,
@@ -407,20 +449,43 @@ def handle_new_batch_state(chat_id, user_id, text):
             return True
         state["data"]["name"] = text
         state["step"] = "type"
-        send_message(chat_id, "请选择批次类型，发送：\nusage = 使用次数\nunique = 领完为止")
+        send_message(
+            chat_id,
+            "创建批次：第 2 步 / 共 4 步\n\n"
+            "请选择兑换码类型：\n\n"
+            "使用次数：只有一个兑换码，可被多个用户领取，达到次数上限后停止。\n"
+            "领完为止：导入多个兑换码，每个兑换码只发给一个用户。",
+            batch_type_keyboard(),
+        )
         return True
 
     if step == "type":
         value = text.strip().lower()
+        if text == "使用次数":
+            value = "usage"
+        elif text == "领完为止":
+            value = "unique"
         if value not in ("usage", "unique"):
-            send_message(chat_id, "类型只能是 usage 或 unique。")
+            send_message(chat_id, "请点击「使用次数」或「领完为止」，也可以发送 usage 或 unique。")
             return True
         state["data"]["batch_type"] = value
         state["step"] = "codes"
         if value == "usage":
-            send_message(chat_id, "请按两行发送：\n第一行：可使用次数\n第二行：兑换码\n\n示例：\n100\nABC-DEF-001")
+            send_message(
+                chat_id,
+                "创建批次：第 3 步 / 共 4 步\n\n"
+                "请按两行发送：\n"
+                "第一行：可使用次数\n"
+                "第二行：兑换码\n\n"
+                "示例：\n100\nABC-DEF-001",
+            )
         else:
-            send_message(chat_id, "请批量发送兑换码，每行一个：\n\nCODE001\nCODE002\nCODE003")
+            send_message(
+                chat_id,
+                "创建批次：第 3 步 / 共 4 步\n\n"
+                "请批量发送兑换码，每行一个：\n\n"
+                "CODE001\nCODE002\nCODE003",
+            )
         return True
 
     if step == "codes":
@@ -543,6 +608,8 @@ def show_batch_detail(chat_id, user_id, text):
         "创建时间：{0}".format(batch["created_at"]),
         "领取链接：",
         create_batch_link(batch["token"]),
+        "",
+        "分享方式：把上面的领取链接发到频道、群聊或私聊。用户点链接进入后，Bot 会先验证，再自动发码并记录日志。",
     ]
     send_message(chat_id, "\n".join(lines), admin_keyboard())
 
@@ -614,7 +681,13 @@ def begin_claim(chat_id, user, token):
 
     verify_token = uuid.uuid4().hex[:16]
     VERIFY_STATES[user["id"]] = {"token": verify_token, "batch_token": token}
-    send_message(chat_id, "请先完成人机验证，点击下方按钮继续领取。", verify_keyboard(verify_token))
+    send_message(
+        chat_id,
+        "你正在领取：{0}\n\n"
+        "领取流程：点击验证 → 校验资格 → 自动发放兑换码。\n"
+        "请点击下方按钮完成验证。".format(html.escape(batch["name"])),
+        verify_keyboard(verify_token),
+    )
 
 
 def issue_code(chat_id, user, batch_token):
@@ -666,7 +739,10 @@ def issue_code(chat_id, user, batch_token):
             code = batch["shared_code"]
             log_claim(conn, user, batch, code, "success", 1, None)
             conn.execute("COMMIT")
-            send_message(chat_id, "领取成功，你的兑换码是：\n\n<code>{0}</code>".format(html.escape(code)))
+            send_message(
+                chat_id,
+                "领取成功，你的兑换码是：\n\n<code>{0}</code>\n\n领取记录已保存。".format(html.escape(code)),
+            )
             return
 
         code_row = conn.execute(
@@ -694,7 +770,12 @@ def issue_code(chat_id, user, batch_token):
         )
         log_claim(conn, user, batch, code_row["code"], "success", 1, None)
         conn.execute("COMMIT")
-        send_message(chat_id, "领取成功，你的兑换码是：\n\n<code>{0}</code>".format(html.escape(code_row["code"])))
+        send_message(
+            chat_id,
+            "领取成功，你的兑换码是：\n\n<code>{0}</code>\n\n领取记录已保存。".format(
+                html.escape(code_row["code"])
+            ),
+        )
     except Exception:
         conn.execute("ROLLBACK")
         raise
@@ -756,7 +837,7 @@ def process_message(message):
         handle_start(chat_id, user, text)
     elif text.startswith("/admin"):
         handle_admin(chat_id, user_id)
-    elif text.startswith("/newbatch") or text == "创建批次":
+    elif text.startswith("/newbatch") or text == "创建批次" or text == "创建兑换码批次":
         if is_admin(user_id):
             begin_new_batch(chat_id, user_id)
         else:
@@ -767,6 +848,8 @@ def process_message(message):
         show_batch_detail(chat_id, user_id, text)
     elif text.startswith("/records") or text == "最近领取记录":
         show_records(chat_id, user_id)
+    elif text.startswith("/flow") or text == "核心流程":
+        handle_flow(chat_id, user_id)
     else:
         if is_admin(user_id):
             send_message(chat_id, "请选择管理员操作。", admin_keyboard())
