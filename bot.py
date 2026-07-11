@@ -7,6 +7,7 @@ import html
 import json
 import logging
 import os
+import random
 import sqlite3
 import sys
 import time
@@ -211,10 +212,41 @@ def batch_type_keyboard():
     }
 
 
-def verify_keyboard(token):
+def make_captcha():
+    operator = random.choice(["+", "-"])
+    left = random.randint(1, 9)
+    right = random.randint(1, 9)
+    if operator == "-" and left < right:
+        left, right = right, left
+    answer = left + right if operator == "+" else left - right
+    question = "{0} {1} {2} = ?".format(left, operator, right)
+    return question, answer
+
+
+def verify_keyboard(token, answer):
+    options = set([answer])
+    while len(options) < 4:
+        candidate = answer + random.randint(-3, 3)
+        if 0 <= candidate <= 18:
+            options.add(candidate)
+    options = list(options)
+    random.shuffle(options)
     return {
         "inline_keyboard": [
-            [{"text": "点击完成验证", "callback_data": "claim:{0}".format(token)}],
+            [
+                {
+                    "text": str(option),
+                    "callback_data": "captcha:{0}:{1}".format(token, option),
+                }
+                for option in options[:2]
+            ],
+            [
+                {
+                    "text": str(option),
+                    "callback_data": "captcha:{0}:{1}".format(token, option),
+                }
+                for option in options[2:]
+            ],
         ]
     }
 
@@ -320,7 +352,7 @@ def handle_flow(chat_id, user_id):
         "5. Bot 自动生成唯一领取链接\n"
         "6. 管理员复制链接，发到频道、群聊或私聊\n"
         "7. 用户只能通过这个链接进入领取\n"
-        "8. 用户点击一次验证按钮\n"
+        "8. 用户回答个位数加减法验证\n"
         "9. 系统校验资格并自动发放兑换码\n"
         "10. 系统记录领取日志，管理员可查看\n\n"
         "普通用户没有领取菜单，也不能靠命令主动领取。",
@@ -372,7 +404,7 @@ def finish_usage_batch(chat_id, user_id, state, text):
         "类型：使用次数\n"
         "可用次数：{1}\n"
         "领取链接：\n{2}\n\n"
-        "下一步：复制这条链接发给用户。用户只能通过这条链接领取，领取前需要点击一次验证按钮。".format(
+        "下一步：复制这条链接发给用户。用户只能通过这条链接领取，领取前需要回答一道个位数加减法验证题。".format(
             html.escape(state["data"]["name"]),
             usage_limit,
             create_batch_link(token),
@@ -680,13 +712,19 @@ def begin_claim(chat_id, user, token):
             return
 
     verify_token = uuid.uuid4().hex[:16]
-    VERIFY_STATES[user["id"]] = {"token": verify_token, "batch_token": token}
+    question, answer = make_captcha()
+    VERIFY_STATES[user["id"]] = {
+        "token": verify_token,
+        "batch_token": token,
+        "answer": answer,
+    }
     send_message(
         chat_id,
         "你正在领取：{0}\n\n"
-        "领取流程：点击验证 → 校验资格 → 自动发放兑换码。\n"
-        "请点击下方按钮完成验证。".format(html.escape(batch["name"])),
-        verify_keyboard(verify_token),
+        "领取流程：完成验证 → 校验资格 → 自动发放兑换码。\n\n"
+        "请完成下面的验证题：\n"
+        "{1}".format(html.escape(batch["name"]), html.escape(question)),
+        verify_keyboard(verify_token, answer),
     )
 
 
@@ -793,13 +831,32 @@ def handle_callback(callback_query):
     data = callback_query.get("data") or ""
     if not callback_id or not chat_id or not user_id:
         return
-    if not data.startswith("claim:"):
+    if not data.startswith("captcha:"):
         answer_callback_query(callback_id)
         return
-    token = data.split(":", 1)[1]
+    parts = data.split(":")
+    if len(parts) != 3:
+        answer_callback_query(callback_id, "验证数据异常，请重新打开领取链接。", show_alert=True)
+        return
+    token = parts[1]
+    try:
+        selected_answer = int(parts[2])
+    except ValueError:
+        answer_callback_query(callback_id, "验证数据异常，请重新打开领取链接。", show_alert=True)
+        return
     state = VERIFY_STATES.get(user_id)
     if not state or state.get("token") != token:
         answer_callback_query(callback_id, "验证已失效，请重新打开领取链接。", show_alert=True)
+        return
+    if selected_answer != state.get("answer"):
+        VERIFY_STATES.pop(user_id, None)
+        with db_connect() as conn:
+            upsert_user(conn, user)
+            batch = find_batch(conn, state["batch_token"])
+            if batch:
+                log_claim(conn, user, batch, None, "failed", 0, "captcha_failed")
+        answer_callback_query(callback_id, "验证失败，请重新打开领取链接。", show_alert=True)
+        send_message(chat_id, "人机验证失败，本次领取已终止。请重新打开领取链接后再试。")
         return
     VERIFY_STATES.pop(user_id, None)
     answer_callback_query(callback_id, "验证通过")
