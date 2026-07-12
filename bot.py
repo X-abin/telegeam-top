@@ -465,6 +465,7 @@ def log_claim(conn, user, batch, code, status, captcha_passed, reason):
 def configure_bot_menu():
     user_commands = [
         {"command": "start", "description": "通过专属链接领取兑换码"},
+        {"command": "whoami", "description": "查看自己的 Telegram User ID"},
     ]
     admin_commands = user_commands + [
         {"command": "admin", "description": "管理员面板"},
@@ -1116,6 +1117,18 @@ def handle_chatid(chat_id, message):
     )
 
 
+def handle_whoami(chat_id, user):
+    username = user.get("username")
+    username_text = "@{0}".format(username) if username else "-"
+    send_message(
+        chat_id,
+        "你的 Telegram User ID：<code>{0}</code>\n用户名：{1}".format(
+            user["id"],
+            html.escape(username_text),
+        ),
+    )
+
+
 def process_message(message):
     chat = message.get("chat") or {}
     user = message.get("from") or {}
@@ -1137,6 +1150,8 @@ def process_message(message):
         handle_start(chat_id, user, text)
     elif text.startswith("/admin"):
         handle_admin(chat_id, user_id)
+    elif text.startswith("/whoami"):
+        handle_whoami(chat_id, user)
     elif text.startswith("/chatid"):
         handle_chatid(chat_id, message)
     elif text.startswith("/newbatch") or text == "创建批次" or text == "创建兑换码批次":
