@@ -62,6 +62,8 @@ API_BASE = "https://api.telegram.org/bot{0}/".format(BOT_TOKEN)
 
 ADMIN_STATES = {}
 VERIFY_STATES = {}
+CLEANUP_MESSAGES = {}
+CAPTCHA_TTL_SECONDS = 120
 
 
 def ensure_dirs():
@@ -211,6 +213,36 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     return api_call("sendMessage", data)
+
+
+def delete_message(chat_id, message_id):
+    if not chat_id or not message_id:
+        return False
+    try:
+        api_call("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        return True
+    except Exception as exc:
+        logging.debug("deleteMessage ignored chat=%s message=%s error=%s", chat_id, message_id, exc)
+        return False
+
+
+def cleanup_key(chat_id, user_id=None):
+    return "{0}:{1}".format(chat_id, user_id or chat_id)
+
+
+def send_flow_message(chat_id, user_id, text, reply_markup=None, replace_previous=True):
+    key = cleanup_key(chat_id, user_id)
+    if replace_previous:
+        delete_message(chat_id, CLEANUP_MESSAGES.pop(key, None))
+    result = send_message(chat_id, text, reply_markup)
+    message_id = result.get("message_id") if isinstance(result, dict) else None
+    if message_id:
+        CLEANUP_MESSAGES[key] = message_id
+    return result
+
+
+def clear_flow_message(chat_id, user_id):
+    delete_message(chat_id, CLEANUP_MESSAGES.pop(cleanup_key(chat_id, user_id), None))
 
 
 def answer_callback_query(callback_query_id, text=None, show_alert=False):
@@ -378,8 +410,9 @@ def show_defaults_screen(chat_id, user_id, message_id=None):
     text = render_defaults_summary(data) + "\n\n<i>点击按钮修改默认值。</i>"
     if message_id:
         edit_message_text(chat_id, message_id, text, defaults_keyboard())
+        CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
     else:
-        send_message(chat_id, text, defaults_keyboard())
+        send_flow_message(chat_id, user_id, text, defaults_keyboard())
 
 
 def show_batch_condition_screen(chat_id, user_id, message_id=None):
@@ -396,8 +429,9 @@ def show_batch_condition_screen(chat_id, user_id, message_id=None):
     )
     if message_id:
         edit_message_text(chat_id, message_id, text, condition_edit_keyboard())
+        CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
     else:
-        send_message(chat_id, text, condition_edit_keyboard())
+        send_flow_message(chat_id, user_id, text, condition_edit_keyboard())
 
 
 def show_batch_preview(chat_id, user_id, message_id=None):
@@ -413,8 +447,9 @@ def show_batch_preview(chat_id, user_id, message_id=None):
     )
     if message_id:
         edit_message_text(chat_id, message_id, text, confirm_keyboard())
+        CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
     else:
-        send_message(chat_id, text, confirm_keyboard())
+        send_flow_message(chat_id, user_id, text, confirm_keyboard())
 
 
 def admin_keyboard():
@@ -497,41 +532,34 @@ def confirm_keyboard():
 
 
 def make_captcha():
-    operator = random.choice(["+", "-"])
-    left = random.randint(1, 9)
-    right = random.randint(1, 9)
-    if operator == "-" and left < right:
-        left, right = right, left
-    answer = left + right if operator == "+" else left - right
-    question = "{0} {1} {2} = ?".format(left, operator, right)
-    return question, answer
+    symbols = ["◆", "◇", "●", "○", "▲", "△", "■", "□", "★", "☆", "✚", "✦"]
+    labels = random.sample(symbols, 9)
+    target = random.choice(labels)
+    choices = []
+    answer_key = None
+    for label in labels:
+        choice_key = uuid.uuid4().hex[:8]
+        if label == target:
+            answer_key = choice_key
+        choices.append({"label": label, "key": choice_key})
+    random.shuffle(choices)
+    return target, answer_key, choices
 
 
-def verify_keyboard(token, answer):
-    options = set([answer])
-    while len(options) < 4:
-        candidate = answer + random.randint(-3, 3)
-        if 0 <= candidate <= 18:
-            options.add(candidate)
-    options = list(options)
-    random.shuffle(options)
+def verify_keyboard(token, choices):
+    rows = []
+    for index in range(0, len(choices), 3):
+        row = []
+        for choice in choices[index:index + 3]:
+            row.append(
+                {
+                    "text": choice["label"],
+                    "callback_data": "captcha:{0}:{1}".format(token, choice["key"]),
+                }
+            )
+        rows.append(row)
     return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": str(option),
-                    "callback_data": "captcha:{0}:{1}".format(token, option),
-                }
-                for option in options[:2]
-            ],
-            [
-                {
-                    "text": str(option),
-                    "callback_data": "captcha:{0}:{1}".format(token, option),
-                }
-                for option in options[2:]
-            ],
-        ]
+        "inline_keyboard": rows
     }
 
 
@@ -747,7 +775,7 @@ def handle_flow(chat_id, user_id):
         "5. 导入兑换码并确认创建\n"
         "6. Bot 自动生成唯一领取链接\n"
         "7. 管理员复制链接发到频道、群聊或私聊\n"
-        "8. 用户进入后先做加减法验证\n"
+        "8. 用户进入后先做九宫格点击验证\n"
         "9. 系统再校验领取条件并自动发码\n"
         "10. 全过程自动记录领取日志\n\n"
         "<i>普通用户没有领取入口，只能通过专属链接领取。</i>",
@@ -952,25 +980,27 @@ def begin_claim(chat_id, user, token):
             return
 
     verify_token = uuid.uuid4().hex[:16]
-    question, answer = make_captcha()
+    target, answer_key, choices = make_captcha()
     VERIFY_STATES[user["id"]] = {
         "token": verify_token,
         "batch_token": token,
-        "answer": answer,
+        "answer_key": answer_key,
+        "expires_at": time.time() + CAPTCHA_TTL_SECONDS,
     }
-    send_message(
+    send_flow_message(
         chat_id,
+        user["id"],
         "<b>🎁 准备领取</b>\n\n"
         "• 批次：<b>{0}</b>\n\n"
         "{1}\n\n"
-        "<b>✅ 人机验证</b>\n"
-        "请点击正确答案：<code>{2}</code>\n\n"
-        "<i>验证通过后，系统会自动校验资格并发放兑换码。</i>".format(
+        "<b>🛡 人机验证</b>\n"
+        "请在下方九宫格中点击这个图案：<b>{2}</b>\n\n"
+        "<i>验证码 2 分钟内有效，通过后会自动校验资格并发放兑换码。</i>".format(
             html.escape(batch["name"]),
             "\n".join(condition_lines(batch)),
-            html.escape(question),
+            html.escape(target),
         ),
-        verify_keyboard(verify_token, answer),
+        verify_keyboard(verify_token, choices),
     )
 
 
@@ -1101,17 +1131,19 @@ def handle_callback(callback_query):
         answer_callback_query(callback_id, "验证数据异常，请重新打开领取链接。", show_alert=True)
         return
     token = parts[1]
-    try:
-        selected_answer = int(parts[2])
-    except ValueError:
-        answer_callback_query(callback_id, "验证数据异常，请重新打开领取链接。", show_alert=True)
-        return
+    selected_key = parts[2]
     state = VERIFY_STATES.get(user_id)
     if not state or state.get("token") != token:
         answer_callback_query(callback_id, "验证已失效，请重新打开领取链接。", show_alert=True)
         return
-    if selected_answer != state.get("answer"):
+    if time.time() > state.get("expires_at", 0):
         VERIFY_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
+        answer_callback_query(callback_id, "验证已过期，请重新打开领取链接。", show_alert=True)
+        return
+    if selected_key != state.get("answer_key"):
+        VERIFY_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
         with db_connect() as conn:
             upsert_user(conn, user)
             batch = find_batch(conn, state["batch_token"])
@@ -1121,6 +1153,7 @@ def handle_callback(callback_query):
         send_message(chat_id, "人机验证失败，本次领取已终止。请重新打开领取链接后再试。")
         return
     VERIFY_STATES.pop(user_id, None)
+    clear_flow_message(chat_id, user_id)
     answer_callback_query(callback_id, "验证通过")
     issue_code(chat_id, user, state["batch_token"])
 
@@ -1145,8 +1178,9 @@ def begin_new_batch_v2(chat_id, user_id):
         "step": "name",
         "data": defaults,
     }
-    send_message(
+    send_flow_message(
         chat_id,
+        user_id,
         "<b>📦 创建批次</b>\n"
         "<b>第 1 步 / 共 5 步</b>\n\n"
         "请输入批次名称。\n"
@@ -1170,15 +1204,16 @@ def begin_defaults_screen(chat_id, user_id, return_state=None):
         "data": defaults,
         "return_state": copy.deepcopy(return_state) if return_state else None,
     }
-    send_message(chat_id, render_defaults_summary(defaults) + "\n\n<i>点击按钮修改默认值。</i>", defaults_keyboard())
+    send_flow_message(chat_id, user_id, render_defaults_summary(defaults) + "\n\n<i>点击按钮修改默认值。</i>", defaults_keyboard())
 
 
 def show_admin_panel_v2(chat_id, user_id):
     if not is_admin(user_id):
         send_message(chat_id, "你不是管理员，无法使用管理功能。")
         return
-    send_message(
+    send_flow_message(
         chat_id,
+        user_id,
         "<b>🛠 管理员面板</b>\n\n"
         "<b>本机状态</b>\n"
         "• 批次创建：按钮式配置 + 最终确认\n"
@@ -1193,8 +1228,9 @@ def show_flow_v2(chat_id, user_id):
     if not is_admin(user_id):
         send_message(chat_id, "你不是管理员。")
         return
-    send_message(
+    send_flow_message(
         chat_id,
+        user_id,
         "<b>🧭 核心流程</b>\n\n"
         "1. 点击 <code>📦 创建批次</code>\n"
         "2. 输入批次名称\n"
@@ -1202,7 +1238,7 @@ def show_flow_v2(chat_id, user_id):
         "4. 用按钮调整领取条件\n"
         "5. 导入兑换码并确认创建\n"
         "6. 分享专属领取链接\n"
-        "7. 用户完成加减法验证\n"
+        "7. 用户完成九宫格点击验证\n"
         "8. 系统校验群发言数 / 频道关注条件\n"
         "9. 自动发放兑换码并记录日志\n\n"
         "<i>普通用户不会看到领取入口，只能通过专属链接领取。</i>",
@@ -1308,6 +1344,7 @@ def create_batch_from_draft(chat_id, user_id):
                     (batch_id, code, current),
                 )
     ADMIN_STATES.pop(user_id, None)
+    clear_flow_message(chat_id, user_id)
     summary = render_batch_summary(data)
     send_message(
         chat_id,
@@ -1326,6 +1363,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
 
     if text in ("⬅️ 取消", "取消操作"):
         ADMIN_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
         send_message(chat_id, "<b>已取消创建批次。</b>", admin_keyboard())
         return True
 
@@ -1335,7 +1373,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
             begin_new_batch_v2(chat_id, user_id)
         elif state["step"] == "conditions":
             state["step"] = "type"
-            send_message(chat_id, "<b>🔁 选择批次类型</b>\n\n请点击一个选项。", batch_type_keyboard())
+            send_flow_message(chat_id, user_id, "<b>🔁 选择批次类型</b>\n\n请点击一个选项。", batch_type_keyboard())
         elif state["step"] == "codes":
             state["step"] = "conditions"
             show_batch_condition_screen(chat_id, user_id)
@@ -1344,8 +1382,9 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
             show_batch_condition_screen(chat_id, user_id)
         elif state["step"] == "usage_code":
             state["step"] = "usage_limit"
-            send_message(
+            send_flow_message(
                 chat_id,
+                user_id,
                 "<b>🧾 第 4 步 / 共 5 步</b>\n\n请输入这个兑换码可被领取的次数。\n\n"
                 "<i>示例：</i> <code>100</code>",
                 admin_keyboard(),
@@ -1354,11 +1393,11 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
 
     if state["step"] == "name":
         if not text:
-            send_message(chat_id, "批次名称不能为空。")
+            send_flow_message(chat_id, user_id, "批次名称不能为空。")
             return True
         state["data"]["name"] = text
         state["step"] = "type"
-        send_message(chat_id, "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。", batch_type_keyboard())
+        send_flow_message(chat_id, user_id, "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。", batch_type_keyboard())
         return True
 
     if state["step"] == "type":
@@ -1367,7 +1406,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         elif text in ("🎁 领完为止", "领完为止", "unique"):
             state["data"]["batch_type"] = "unique"
         else:
-            send_message(chat_id, "请点击一个类型按钮。", batch_type_keyboard())
+            send_flow_message(chat_id, user_id, "请点击一个类型按钮。", batch_type_keyboard())
             return True
         state["step"] = "conditions"
         show_batch_condition_screen(chat_id, user_id)
@@ -1378,7 +1417,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_message(chat_id, str(exc))
+            send_flow_message(chat_id, user_id, str(exc))
             return True
         state["step"] = "conditions"
         state["pending_field"] = None
@@ -1389,15 +1428,16 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             usage_limit = parse_nonnegative_int(text, "可用次数")
         except ValueError as exc:
-            send_message(chat_id, str(exc))
+            send_flow_message(chat_id, user_id, str(exc))
             return True
         if usage_limit <= 0:
-            send_message(chat_id, "可用次数必须大于 0。")
+            send_flow_message(chat_id, user_id, "可用次数必须大于 0。")
             return True
         state["data"]["usage_limit"] = usage_limit
         state["step"] = "usage_code"
-        send_message(
+        send_flow_message(
             chat_id,
+            user_id,
             "<b>🧾 第 5 步 / 共 5 步</b>\n\n请输入这一个兑换码。\n"
             "<i>示例：</i> <code>ABC-DEF-001</code>",
             admin_keyboard(),
@@ -1407,7 +1447,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     if state["step"] == "usage_code":
         code = text.strip()
         if not code:
-            send_message(chat_id, "兑换码不能为空。")
+            send_flow_message(chat_id, user_id, "兑换码不能为空。")
             return True
         state["data"]["shared_code"] = code
         state["step"] = "confirm"
@@ -1417,7 +1457,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     if state["step"] == "codes":
         raw_codes = [line.strip() for line in text.splitlines() if line.strip()]
         if not raw_codes:
-            send_message(chat_id, "请发送兑换码，每行一个。")
+            send_flow_message(chat_id, user_id, "请发送兑换码，每行一个。")
             return True
         seen = set()
         codes = []
@@ -1435,7 +1475,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "confirm":
-        send_message(chat_id, "请点击下方按钮确认创建，或返回修改。", confirm_keyboard())
+        send_flow_message(chat_id, user_id, "请点击下方按钮确认创建，或返回修改。", confirm_keyboard())
         return True
 
     return False
@@ -1448,6 +1488,7 @@ def handle_defaults_state(chat_id, user_id, text):
 
     if text in ("⬅️ 取消", "取消操作"):
         ADMIN_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
         send_message(chat_id, "<b>已取消默认值设置。</b>", admin_keyboard())
         return True
 
@@ -1457,7 +1498,7 @@ def handle_defaults_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "menu":
-        send_message(chat_id, "请点击下方按钮修改默认值。", defaults_keyboard())
+        send_flow_message(chat_id, user_id, "请点击下方按钮修改默认值。", defaults_keyboard())
         return True
 
     if state["step"] == "edit":
@@ -1465,7 +1506,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_message(chat_id, str(exc))
+            send_flow_message(chat_id, user_id, str(exc))
             return True
         with db_connect() as conn:
             set_setting(conn, "default_required_group_id", state["data"].get("required_group_id") or "")
@@ -1496,15 +1537,15 @@ def handle_draft_callback(callback_query):
     if data == "group_id":
         state["step"] = "condition_input"
         state["pending_field"] = "required_group_id"
-        send_message(chat_id, ask_condition_value(chat_id, "required_group_id"), admin_keyboard())
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_group_id"), admin_keyboard())
     elif data == "group_messages":
         state["step"] = "condition_input"
         state["pending_field"] = "required_group_messages"
-        send_message(chat_id, ask_condition_value(chat_id, "required_group_messages"), admin_keyboard())
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_group_messages"), admin_keyboard())
     elif data == "channel_id":
         state["step"] = "condition_input"
         state["pending_field"] = "required_channel_id"
-        send_message(chat_id, ask_condition_value(chat_id, "required_channel_id"), admin_keyboard())
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_channel_id"), admin_keyboard())
     elif data == "load_defaults":
         with db_connect() as conn:
             state["data"].update(load_default_conditions(conn))
@@ -1517,8 +1558,9 @@ def handle_draft_callback(callback_query):
     elif data == "continue":
         if state["data"]["batch_type"] == "usage":
             state["step"] = "usage_limit"
-            send_message(
+            send_flow_message(
                 chat_id,
+                user_id,
                 "<b>🧾 第 4 步 / 共 5 步</b>\n\n"
                 "请输入这个兑换码可被领取的次数。\n\n"
                 "<i>示例：</i> <code>100</code>",
@@ -1526,8 +1568,9 @@ def handle_draft_callback(callback_query):
             )
         else:
             state["step"] = "codes"
-            send_message(
+            send_flow_message(
                 chat_id,
+                user_id,
                 "<b>🎁 第 4 步 / 共 5 步</b>\n\n"
                 "请批量发送兑换码，每行一个。\n\n"
                 "<i>示例：</i>\n<code>CODE001</code>\n<code>CODE002</code>\n<code>CODE003</code>",
@@ -1535,7 +1578,7 @@ def handle_draft_callback(callback_query):
             )
     elif data == "back_type":
         state["step"] = "type"
-        send_message(chat_id, "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。", batch_type_keyboard())
+        send_flow_message(chat_id, user_id, "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。", batch_type_keyboard())
     elif data == "open_defaults":
         begin_defaults_screen(chat_id, user_id, state)
     elif data == "edit_conditions":
@@ -1544,8 +1587,9 @@ def handle_draft_callback(callback_query):
     elif data == "edit_codes":
         if state["data"]["batch_type"] == "usage":
             state["step"] = "usage_limit"
-            send_message(
+            send_flow_message(
                 chat_id,
+                user_id,
                 "<b>🧾 第 4 步 / 共 5 步</b>\n\n"
                 "请输入这个兑换码可被领取的次数。\n\n"
                 "<i>示例：</i> <code>100</code>",
@@ -1553,8 +1597,9 @@ def handle_draft_callback(callback_query):
             )
         else:
             state["step"] = "codes"
-            send_message(
+            send_flow_message(
                 chat_id,
+                user_id,
                 "<b>🎁 第 4 步 / 共 5 步</b>\n\n"
                 "请批量发送兑换码，每行一个。\n\n"
                 "<i>示例：</i>\n<code>CODE001</code>\n<code>CODE002</code>\n<code>CODE003</code>",
@@ -1562,7 +1607,7 @@ def handle_draft_callback(callback_query):
             )
     elif data == "edit_type":
         state["step"] = "type"
-        send_message(chat_id, "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。", batch_type_keyboard())
+        send_flow_message(chat_id, user_id, "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。", batch_type_keyboard())
     elif data == "confirm":
         create_batch_from_draft(chat_id, user_id)
 
@@ -1588,7 +1633,7 @@ def handle_defaults_callback(callback_query):
             "group_messages": "required_group_messages",
             "channel_id": "required_channel_id",
         }[data]
-        send_message(chat_id, ask_condition_value(chat_id, state["pending_field"]), admin_keyboard())
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, state["pending_field"]), admin_keyboard())
     elif data == "clear":
         state["data"]["required_group_id"] = None
         state["data"]["required_group_messages"] = 0
@@ -1602,6 +1647,7 @@ def handle_defaults_callback(callback_query):
         return_state = state.get("return_state")
         if return_state:
             ADMIN_STATES[user_id] = return_state
+            clear_flow_message(chat_id, user_id)
             send_message(chat_id, "<b>✅ 默认值已保存，已返回批次草稿。</b>", admin_keyboard())
             if return_state.get("step") == "conditions":
                 show_batch_condition_screen(chat_id, user_id)
@@ -1609,6 +1655,7 @@ def handle_defaults_callback(callback_query):
                 show_batch_preview(chat_id, user_id)
         else:
             ADMIN_STATES.pop(user_id, None)
+            clear_flow_message(chat_id, user_id)
             send_message(chat_id, "<b>✅ 默认值已保存。</b>", admin_keyboard())
 def handle_chatid(chat_id, message):
     chat = message.get("chat") or {}
@@ -1648,6 +1695,8 @@ def process_message(message):
 
     if not is_private_chat(chat):
         return
+
+    delete_message(chat_id, message.get("message_id"))
 
     if handle_newbatch_v2_state(chat_id, user_id, text):
         return
