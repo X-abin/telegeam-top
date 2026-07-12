@@ -474,7 +474,7 @@ def render_condition_lines(data):
     channel_id = data.get("required_channel_id")
     lines = []
     if group_id and group_messages > 0:
-        lines.append("• <b>群发言数</b>：{0} 中累计发言/活跃 <b>至少 {1}</b>".format(html.escape(str(group_id)), group_messages))
+        lines.append("• <b>群发言数</b>：{0} 中普通发言 <b>至少 {1}</b>".format(html.escape(str(group_id)), group_messages))
     else:
         lines.append("• <b>群发言数</b>：<i>未启用</i>")
     if channel_id:
@@ -598,7 +598,8 @@ def admin_keyboard():
         "keyboard": [
             [{"text": "📦 创建批次"}, {"text": "📋 批次列表"}],
             [{"text": "⚙️ 默认条件"}, {"text": "🧭 核心流程"}],
-            [{"text": "📊 已记录群"}, {"text": "🗒 最近记录"}],
+            [{"text": "📊 已记录群"}, {"text": "🛡 接收状态"}],
+            [{"text": "🗒 最近记录"}],
             [{"text": "⬅️ 取消"}],
         ],
         "resize_keyboard": True,
@@ -738,7 +739,7 @@ def condition_lines(batch):
     lines = []
     if batch["required_group_id"] and (batch["required_group_messages"] or 0) > 0:
         lines.append(
-            "• <b>群发言数</b>：{0} 中累计发言/活跃 <b>至少 {1}</b>".format(
+            "• <b>群发言数</b>：{0} 中普通发言 <b>至少 {1}</b>".format(
                 html.escape(str(batch["required_group_id"])),
                 batch["required_group_messages"],
             )
@@ -748,6 +749,38 @@ def condition_lines(batch):
     if not lines:
         lines.append("• <b>领取条件</b>：<i>无额外条件</i>")
     return ["<b>⚙️ 领取条件</b>"] + lines
+
+
+def is_command_message(message):
+    text = (message.get("text") or message.get("caption") or "").strip()
+    return text.startswith("/")
+
+
+def has_countable_group_content(message):
+    if is_command_message(message):
+        return False
+    content_keys = (
+        "text",
+        "audio",
+        "document",
+        "animation",
+        "game",
+        "photo",
+        "sticker",
+        "video",
+        "voice",
+        "video_note",
+        "caption",
+        "contact",
+        "dice",
+        "poll",
+        "venue",
+        "location",
+    )
+    for key in content_keys:
+        if message.get(key) is not None:
+            return True
+    return False
 
 
 def record_group_message(message):
@@ -771,6 +804,8 @@ def record_group_message(message):
             """,
             (chat_id, title, chat.get("username"), chat_type, current),
         )
+        if not has_countable_group_content(message):
+            return
         conn.execute(
             """
             INSERT OR IGNORE INTO user_chat_stats
@@ -800,12 +835,6 @@ def member_is_joined(member):
     return False
 
 
-def active_command_text():
-    if BOT_USERNAME:
-        return "/active@{0}".format(BOT_USERNAME)
-    return "/active"
-
-
 def check_claim_conditions(conn, user, batch):
     group_id = batch["required_group_id"]
     group_messages = batch["required_group_messages"] or 0
@@ -829,12 +858,11 @@ def check_claim_conditions(conn, user, batch):
                 False,
                 "group_messages_not_enough",
                 "<b>领取失败</b>\n\n"
-                "你在指定群聊 <b>{0}</b> 中的累计发言/活跃数是 <b>{1}</b>，需要至少 <b>{2}</b> 才能领取。\n\n"
-                "如果 Bot 无法统计普通聊天内容，请到该群发送 <code>{3}</code>，Bot 会静默记录一次群内活跃，然后重新打开领取链接。".format(
+                "你在指定群聊 <b>{0}</b> 中的普通发言数是 <b>{1}</b>，需要至少 <b>{2}</b> 才能领取。\n\n"
+                "如果这里一直是 0，请让管理员确认 BotFather 的 Privacy Mode 已关闭，并且 Bot 仍在目标群内。".format(
                     html.escape(group_title),
                     message_count,
                     group_messages,
-                    html.escape(active_command_text()),
                 ),
             )
 
@@ -896,6 +924,7 @@ def configure_bot_menu():
         {"command": "records", "description": "查看最近领取记录"},
         {"command": "flow", "description": "查看核心流程"},
         {"command": "groups", "description": "查看已记录群 ID"},
+        {"command": "botstatus", "description": "查看群消息接收状态"},
         {"command": "chatid", "description": "查看当前会话 ID"},
     ]
     api_call("deleteWebhook", {"drop_pending_updates": "false"})
@@ -1144,18 +1173,14 @@ def show_seen_groups(chat_id, user_id):
             "<b>📊 已记录群</b>\n\n"
             "<i>暂时没有记录到群聊消息。</i>\n\n"
             "请把 Bot 加入目标群。\n"
-            "普通聊天统计需要在 BotFather 关闭 privacy mode；如果不关闭，也可以让用户在群里发送 <code>{0}</code> 来静默记录活跃。".format(
-                html.escape(active_command_text())
-            ),
+            "普通聊天统计需要在 BotFather 关闭 privacy mode；关闭后 Bot 会静默记录群内普通用户发言。",
             admin_keyboard(),
         )
         return
     lines = [
         "<b>📊 已记录群</b>",
         "<i>创建批次时，点击“群发言条件”后复制这里的 Chat ID。</i>",
-        "<i>统计来源：Bot 收到的普通群消息，或用户在群里发送的 {0}。</i>".format(
-            html.escape(active_command_text())
-        ),
+        "<i>统计来源：Bot 收到的普通群消息；斜杠命令不会计入。</i>",
     ]
     for row in rows:
         username = "@{0}".format(row["username"]) if row["username"] else "-"
@@ -1164,7 +1189,7 @@ def show_seen_groups(chat_id, user_id):
             "• Chat ID：<code>{1}</code>\n"
             "• 类型：{2}\n"
             "• 用户数：{3}\n"
-            "• 已统计发言/活跃：{4}\n"
+            "• 已统计普通发言：{4}\n"
             "• 用户名：{5}\n"
             "• 最近记录：{6}".format(
                 html.escape(row["title"] or row["chat_id"]),
@@ -1177,6 +1202,44 @@ def show_seen_groups(chat_id, user_id):
             )
         )
     send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def show_bot_receive_status(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, "你不是管理员。")
+        return
+    try:
+        bot_info = api_call("getMe")
+    except Exception as exc:
+        send_message(chat_id, "<b>🛡 接收状态</b>\n\n无法获取 Bot 状态：{0}".format(html.escape(str(exc))), admin_keyboard())
+        return
+
+    can_read = bot_info.get("can_read_all_group_messages")
+    username = bot_info.get("username") or BOT_USERNAME or "-"
+    if can_read is True:
+        status_text = "✅ 已关闭 Privacy Mode，Bot 可以接收普通群消息。"
+    elif can_read is False:
+        status_text = "⚠️ Privacy Mode 仍开启，Bot 无法接收普通群消息。"
+    else:
+        status_text = "⚠️ Telegram 未返回明确状态，请以 BotFather 设置为准。"
+
+    send_message(
+        chat_id,
+        "<b>🛡 群消息接收状态</b>\n\n"
+        "• Bot：@{0}\n"
+        "• 普通群消息接收：{1}\n\n"
+        "<b>BotFather 设置路径</b>\n"
+        "1. 打开 @BotFather\n"
+        "2. 发送 <code>/mybots</code>\n"
+        "3. 选择当前 Bot\n"
+        "4. Bot Settings → Group Privacy\n"
+        "5. 选择 <b>Turn off</b>\n\n"
+        "<i>关闭后，把 Bot 留在目标群里。之后群内普通用户发言会被静默计数，Bot 不会回复。</i>".format(
+            html.escape(username),
+            status_text,
+        ),
+        admin_keyboard(),
+    )
 
 
 def forwarded_chat_from_message(message):
@@ -1547,7 +1610,7 @@ def ask_group_condition_id():
         "<b>第 1 步 / 共 2 步</b>\n"
         "请发送要统计发言的<b>群 ID</b>。\n\n"
         "可点击 <code>📊 已记录群</code> 查看 Bot 已记录到的群 ID。\n"
-        "<blockquote>群 ID 用于统计群内发言/活跃；频道订阅 ID 用于检测订阅，两者可以不同。</blockquote>\n"
+        "<blockquote>群 ID 用于统计群内普通发言；频道订阅 ID 用于检测订阅，两者可以不同。</blockquote>\n"
         "输入 <code>0</code> 表示不启用群发言条件。"
     )
 
@@ -1557,10 +1620,10 @@ def ask_group_condition_messages(group_id):
         "<b>💬 设置群发言条件</b>\n\n"
         "<b>第 2 步 / 共 2 步</b>\n"
         "群 ID：<code>{0}</code>\n\n"
-        "请输入最低发言/活跃数，用户累计数必须 <b>至少达到</b> 这个数字才能领取。\n"
-        "如果 Bot 收不到普通群消息，用户可在群内发送 <code>{1}</code> 增加一次活跃记录。\n"
+        "请输入最低普通发言数，用户累计普通发言必须 <b>至少达到</b> 这个数字才能领取。\n"
+        "如果 Bot 收不到普通群消息，请先到 BotFather 关闭 Privacy Mode。\n"
         "<i>示例：</i> <code>5</code>"
-    ).format(html.escape(str(group_id)), html.escape(active_command_text()))
+    ).format(html.escape(str(group_id)))
 
 
 def apply_condition_input(state, field, text):
@@ -2100,6 +2163,8 @@ def process_message(message):
         handle_chatid(chat_id, message)
     elif text.startswith("/groups") or text in ("📊 已记录群", "已记录群"):
         show_seen_groups(chat_id, user_id)
+    elif text.startswith("/botstatus") or text in ("🛡 接收状态", "接收状态"):
+        show_bot_receive_status(chat_id, user_id)
     elif text.startswith("/defaults") or text == "⚙️ 默认条件":
         begin_defaults_screen(chat_id, user_id)
     elif text.startswith("/newbatch") or text in ("创建批次", "创建兑换码批次", "📦 创建批次"):
