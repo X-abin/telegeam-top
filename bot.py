@@ -280,6 +280,14 @@ def edit_message_text(chat_id, message_id, text, reply_markup=None):
     return api_call("editMessageText", data)
 
 
+def safe_edit_message_text(chat_id, message_id, text, reply_markup=None):
+    try:
+        return edit_message_text(chat_id, message_id, text, reply_markup)
+    except Exception as exc:
+        logging.warning("editMessageText ignored chat=%s message=%s error=%s", chat_id, message_id, exc)
+        return None
+
+
 def get_chat_member(chat_id, user_id):
     try:
         return api_call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
@@ -466,7 +474,7 @@ def render_condition_lines(data):
     channel_id = data.get("required_channel_id")
     lines = []
     if group_id and group_messages > 0:
-        lines.append("• <b>群发言数</b>：{0} 中累计发言 <b>大于 {1}</b>".format(html.escape(str(group_id)), group_messages))
+        lines.append("• <b>群发言数</b>：{0} 中累计发言/活跃 <b>至少 {1}</b>".format(html.escape(str(group_id)), group_messages))
     else:
         lines.append("• <b>群发言数</b>：<i>未启用</i>")
     if channel_id:
@@ -533,8 +541,11 @@ def show_defaults_screen(chat_id, user_id, message_id=None):
             data = load_default_conditions(conn)
     text = render_defaults_summary(data) + "\n\n<i>点击按钮修改默认值。</i>"
     if message_id:
-        edit_message_text(chat_id, message_id, text, defaults_keyboard())
-        CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        result = safe_edit_message_text(chat_id, message_id, text, defaults_keyboard())
+        if result:
+            CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        else:
+            send_flow_message(chat_id, user_id, text, defaults_keyboard())
     else:
         send_flow_message(chat_id, user_id, text, defaults_keyboard())
 
@@ -552,8 +563,11 @@ def show_batch_condition_screen(chat_id, user_id, message_id=None):
         "<blockquote>群发言条件使用“群 ID”；频道订阅条件使用频道/群的订阅检测 ID。两者可以不同，请分别设置。</blockquote>"
     )
     if message_id:
-        edit_message_text(chat_id, message_id, text, condition_edit_keyboard())
-        CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        result = safe_edit_message_text(chat_id, message_id, text, condition_edit_keyboard())
+        if result:
+            CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        else:
+            send_flow_message(chat_id, user_id, text, condition_edit_keyboard())
     else:
         send_flow_message(chat_id, user_id, text, condition_edit_keyboard())
 
@@ -570,8 +584,11 @@ def show_batch_preview(chat_id, user_id, message_id=None):
         "<i>确认后会写入库存并生成专属领取链接。</i>"
     )
     if message_id:
-        edit_message_text(chat_id, message_id, text, confirm_keyboard())
-        CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        result = safe_edit_message_text(chat_id, message_id, text, confirm_keyboard())
+        if result:
+            CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        else:
+            send_flow_message(chat_id, user_id, text, confirm_keyboard())
     else:
         send_flow_message(chat_id, user_id, text, confirm_keyboard())
 
@@ -721,7 +738,7 @@ def condition_lines(batch):
     lines = []
     if batch["required_group_id"] and (batch["required_group_messages"] or 0) > 0:
         lines.append(
-            "• <b>群发言数</b>：{0} 中累计发言 <b>大于 {1}</b>".format(
+            "• <b>群发言数</b>：{0} 中累计发言/活跃 <b>至少 {1}</b>".format(
                 html.escape(str(batch["required_group_id"])),
                 batch["required_group_messages"],
             )
@@ -783,6 +800,12 @@ def member_is_joined(member):
     return False
 
 
+def active_command_text():
+    if BOT_USERNAME:
+        return "/active@{0}".format(BOT_USERNAME)
+    return "/active"
+
+
 def check_claim_conditions(conn, user, batch):
     group_id = batch["required_group_id"]
     group_messages = batch["required_group_messages"] or 0
@@ -796,14 +819,22 @@ def check_claim_conditions(conn, user, batch):
             (user["id"], str(group_id)),
         ).fetchone()
         message_count = row["message_count"] if row else 0
-        if message_count <= group_messages:
+        if message_count < group_messages:
+            info = conn.execute(
+                "SELECT title, username FROM chat_infos WHERE chat_id = ?",
+                (str(group_id),),
+            ).fetchone()
+            group_title = info["title"] if info and info["title"] else str(group_id)
             return (
                 False,
                 "group_messages_not_enough",
                 "<b>领取失败</b>\n\n"
-                "你在指定群聊中的累计发言数是 <b>{0}</b>，需要大于 <b>{1}</b> 才能领取。".format(
+                "你在指定群聊 <b>{0}</b> 中的累计发言/活跃数是 <b>{1}</b>，需要至少 <b>{2}</b> 才能领取。\n\n"
+                "如果 Bot 无法统计普通聊天内容，请到该群发送 <code>{3}</code>，Bot 会静默记录一次群内活跃，然后重新打开领取链接。".format(
+                    html.escape(group_title),
                     message_count,
                     group_messages,
+                    html.escape(active_command_text()),
                 ),
             )
 
@@ -1112,13 +1143,19 @@ def show_seen_groups(chat_id, user_id):
             chat_id,
             "<b>📊 已记录群</b>\n\n"
             "<i>暂时没有记录到群聊消息。</i>\n\n"
-            "请把 Bot 加入目标群，并确保 Bot 能收到群消息；如果是普通群消息，需要在 BotFather 关闭 privacy mode。",
+            "请把 Bot 加入目标群。\n"
+            "普通聊天统计需要在 BotFather 关闭 privacy mode；如果不关闭，也可以让用户在群里发送 <code>{0}</code> 来静默记录活跃。".format(
+                html.escape(active_command_text())
+            ),
             admin_keyboard(),
         )
         return
     lines = [
         "<b>📊 已记录群</b>",
-        "<i>创建批次时，点击“群 ID”后复制这里的 Chat ID。</i>",
+        "<i>创建批次时，点击“群发言条件”后复制这里的 Chat ID。</i>",
+        "<i>统计来源：Bot 收到的普通群消息，或用户在群里发送的 {0}。</i>".format(
+            html.escape(active_command_text())
+        ),
     ]
     for row in rows:
         username = "@{0}".format(row["username"]) if row["username"] else "-"
@@ -1127,7 +1164,7 @@ def show_seen_groups(chat_id, user_id):
             "• Chat ID：<code>{1}</code>\n"
             "• 类型：{2}\n"
             "• 用户数：{3}\n"
-            "• 已统计发言：{4}\n"
+            "• 已统计发言/活跃：{4}\n"
             "• 用户名：{5}\n"
             "• 最近记录：{6}".format(
                 html.escape(row["title"] or row["chat_id"]),
@@ -1510,7 +1547,7 @@ def ask_group_condition_id():
         "<b>第 1 步 / 共 2 步</b>\n"
         "请发送要统计发言的<b>群 ID</b>。\n\n"
         "可点击 <code>📊 已记录群</code> 查看 Bot 已记录到的群 ID。\n"
-        "<blockquote>群 ID 用于统计群内发言；频道订阅 ID 用于检测订阅，两者可以不同。</blockquote>\n"
+        "<blockquote>群 ID 用于统计群内发言/活跃；频道订阅 ID 用于检测订阅，两者可以不同。</blockquote>\n"
         "输入 <code>0</code> 表示不启用群发言条件。"
     )
 
@@ -1520,9 +1557,10 @@ def ask_group_condition_messages(group_id):
         "<b>💬 设置群发言条件</b>\n\n"
         "<b>第 2 步 / 共 2 步</b>\n"
         "群 ID：<code>{0}</code>\n\n"
-        "请输入最低发言数，用户累计发言数必须 <b>大于</b> 这个数字才能领取。\n"
+        "请输入最低发言/活跃数，用户累计数必须 <b>至少达到</b> 这个数字才能领取。\n"
+        "如果 Bot 收不到普通群消息，用户可在群内发送 <code>{1}</code> 增加一次活跃记录。\n"
         "<i>示例：</i> <code>5</code>"
-    ).format(html.escape(str(group_id)))
+    ).format(html.escape(str(group_id)), html.escape(active_command_text()))
 
 
 def apply_condition_input(state, field, text):
