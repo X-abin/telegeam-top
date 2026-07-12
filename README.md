@@ -62,6 +62,7 @@ Bot 内已经提供 `核心流程` 按钮和 `/flow` 命令，管理员可以随
 - `/records` 查看最近领取记录
 - `/flow` 查看核心流程
 - `/chatid` 查看当前群聊 ID
+- `/whoami` 查看自己的 Telegram User ID
 
 用户：
 
