@@ -296,6 +296,14 @@ def get_chat_member(chat_id, user_id):
         return None
 
 
+def get_chat(chat_id):
+    try:
+        return api_call("getChat", {"chat_id": chat_id})
+    except Exception as exc:
+        logging.warning("getChat failed chat=%s error=%s", chat_id, exc)
+        return None
+
+
 def get_setting(conn, key, default=""):
     row = conn.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
     if not row:
@@ -347,6 +355,54 @@ def normalize_chat_id_text(value):
     if value.isdigit() and value.startswith("100") and len(value) > 10:
         return "-{0}".format(value)
     return value
+
+
+def remember_chat_info(chat):
+    if not chat or not chat.get("id"):
+        return
+    chat_id = str(chat.get("id"))
+    title = chat.get("title") or chat.get("username") or chat_id
+    current = now_text()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chat_infos
+                (chat_id, title, username, chat_type, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, title, chat.get("username"), chat.get("type"), current),
+        )
+
+
+def validate_group_chat_id(value):
+    group_id = normalize_chat_id_text(value)
+    if not group_id:
+        return None
+    if group_id.isdigit():
+        raise ValueError(
+            "这看起来是 Telegram 用户 ID，不是群聊 ID。\n\n"
+            "群聊 ID 通常是负数，超级群一般是 <code>-100...</code>。\n"
+            "请点击 <code>📊 已记录群</code> 复制正确的 Chat ID。"
+        )
+    if group_id.startswith("@"):
+        raise ValueError(
+            "群发言统计必须使用数字群 ID，不能使用 @用户名。\n\n"
+            "请点击 <code>📊 已记录群</code> 复制 <code>-100...</code> 格式的 Chat ID。"
+        )
+    if not group_id.startswith("-") or not group_id[1:].isdigit():
+        raise ValueError("群 ID 格式不正确，请填写 <code>-100...</code> 这样的数字群 ID。")
+
+    chat = get_chat(group_id)
+    if not chat:
+        raise ValueError(
+            "Bot 无法访问这个群 ID。\n\n"
+            "请确认 Bot 已加入目标群，然后在群里发送一条普通消息，再回到私聊点击 <code>📊 已记录群</code> 复制 Chat ID。"
+        )
+    chat_type = chat.get("type")
+    if chat_type not in ("group", "supergroup"):
+        raise ValueError("这个 ID 不是群聊 ID，请填写目标群的 Chat ID。")
+    remember_chat_info(chat)
+    return str(chat.get("id"))
 
 
 def data_value(data, key, default=None):
@@ -839,6 +895,16 @@ def check_claim_conditions(conn, user, batch):
     group_id = batch["required_group_id"]
     group_messages = batch["required_group_messages"] or 0
     if group_id and group_messages > 0:
+        if str(group_id).isdigit():
+            return (
+                False,
+                "group_id_invalid",
+                "<b>领取失败</b>\n\n"
+                "当前批次的群发言条件配置错误：<code>{0}</code> 是正数 ID，通常是用户 ID，不是群聊 ID。\n\n"
+                "请管理员重新创建或修改批次，使用 <code>📊 已记录群</code> 里的负数 Chat ID。".format(
+                    html.escape(str(group_id))
+                ),
+            )
         row = conn.execute(
             """
             SELECT message_count
@@ -1181,6 +1247,7 @@ def show_seen_groups(chat_id, user_id):
         "<b>📊 已记录群</b>",
         "<i>创建批次时，点击“群发言条件”后复制这里的 Chat ID。</i>",
         "<i>统计来源：Bot 收到的普通群消息；斜杠命令不会计入。</i>",
+        "<i>如果这里没有目标群，请确认 Bot 在群内，且 Privacy Mode 已关闭后让群里发一条普通消息。</i>",
     ]
     for row in rows:
         username = "@{0}".format(row["username"]) if row["username"] else "-"
@@ -1610,6 +1677,7 @@ def ask_group_condition_id():
         "<b>第 1 步 / 共 2 步</b>\n"
         "请发送要统计发言的<b>群 ID</b>。\n\n"
         "可点击 <code>📊 已记录群</code> 查看 Bot 已记录到的群 ID。\n"
+        "群 ID 通常是负数，超级群一般是 <code>-100...</code>；你的个人 User ID 不能用于这里。\n"
         "<blockquote>群 ID 用于统计群内普通发言；频道订阅 ID 用于检测订阅，两者可以不同。</blockquote>\n"
         "输入 <code>0</code> 表示不启用群发言条件。"
     )
@@ -1629,7 +1697,7 @@ def ask_group_condition_messages(group_id):
 def apply_condition_input(state, field, text):
     text = text.strip()
     if field == "required_group_id":
-        state["data"]["required_group_id"] = normalize_chat_id_text(text)
+        state["data"]["required_group_id"] = validate_group_chat_id(text)
     elif field == "required_group_messages":
         state["data"]["required_group_messages"] = parse_nonnegative_int(text, "群发言数")
     elif field == "required_channel_id":
@@ -1800,7 +1868,11 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "group_condition_id":
-        group_id = normalize_chat_id_text(text)
+        try:
+            group_id = validate_group_chat_id(text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc))
+            return True
         if not group_id:
             state["data"]["required_group_id"] = None
             state["data"]["required_group_messages"] = 0
@@ -1925,7 +1997,11 @@ def handle_defaults_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "group_condition_id":
-        group_id = normalize_chat_id_text(text)
+        try:
+            group_id = validate_group_chat_id(text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc))
+            return True
         if not group_id:
             state["data"]["required_group_id"] = None
             state["data"]["required_group_messages"] = 0
