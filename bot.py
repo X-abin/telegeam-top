@@ -93,6 +93,12 @@ def db_connect():
     return conn
 
 
+def ensure_column(conn, table, column, ddl):
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info({0})".format(table)).fetchall()]
+    if column not in columns:
+        conn.execute(ddl)
+
+
 def init_db():
     with db_connect() as conn:
         conn.executescript(
@@ -114,6 +120,9 @@ def init_db():
                 usage_limit INTEGER,
                 usage_count INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'active',
+                required_group_id TEXT,
+                required_group_messages INTEGER NOT NULL DEFAULT 0,
+                required_channel_id TEXT,
                 created_by INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 CHECK (batch_type IN ('usage', 'unique')),
@@ -146,13 +155,31 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS user_chat_stats (
+                telegram_id INTEGER NOT NULL,
+                chat_id TEXT NOT NULL,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                PRIMARY KEY (telegram_id, chat_id)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_batches_token ON batches(token);
             CREATE INDEX IF NOT EXISTS idx_batch_codes_batch_status ON batch_codes(batch_id, status, id);
             CREATE INDEX IF NOT EXISTS idx_claim_logs_user ON claim_logs(telegram_id);
             CREATE INDEX IF NOT EXISTS idx_claim_logs_batch_user_status
                 ON claim_logs(batch_id, telegram_id, status);
+            CREATE INDEX IF NOT EXISTS idx_user_chat_stats_chat ON user_chat_stats(chat_id, telegram_id);
             """
         )
+        ensure_column(conn, "batches", "required_group_id", "ALTER TABLE batches ADD COLUMN required_group_id TEXT")
+        ensure_column(
+            conn,
+            "batches",
+            "required_group_messages",
+            "ALTER TABLE batches ADD COLUMN required_group_messages INTEGER NOT NULL DEFAULT 0",
+        )
+        ensure_column(conn, "batches", "required_channel_id", "ALTER TABLE batches ADD COLUMN required_channel_id TEXT")
 
 
 def api_call(method, data=None):
@@ -187,6 +214,14 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     if show_alert:
         data["show_alert"] = "true"
     return api_call("answerCallbackQuery", data)
+
+
+def get_chat_member(chat_id, user_id):
+    try:
+        return api_call("getChatMember", {"chat_id": chat_id, "user_id": user_id})
+    except Exception as exc:
+        logging.warning("getChatMember failed chat=%s user=%s error=%s", chat_id, user_id, exc)
+        return None
 
 
 def admin_keyboard():
@@ -280,6 +315,132 @@ def create_batch_link(token):
     return "https://t.me/{0}?start={1}".format(BOT_USERNAME, token)
 
 
+def empty_value(value):
+    return value.strip().lower() in ("", "0", "无", "none", "no", "-")
+
+
+def clean_condition_value(value):
+    value = value.strip()
+    if empty_value(value):
+        return None
+    return value
+
+
+def parse_batch_conditions(text):
+    lines = [line.strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    if len(lines) < 3:
+        raise ValueError("请按 3 行发送领取条件。")
+    group_id = clean_condition_value(lines[0])
+    try:
+        group_messages = int(lines[1])
+    except ValueError:
+        raise ValueError("群发言数必须是数字。")
+    if group_messages < 0:
+        raise ValueError("群发言数不能小于 0。")
+    if group_messages > 0 and not group_id:
+        raise ValueError("设置群发言数条件时，第一行必须填写群 ID。")
+    channel_id = clean_condition_value(lines[2])
+    return {
+        "required_group_id": group_id,
+        "required_group_messages": group_messages,
+        "required_channel_id": channel_id,
+    }
+
+
+def condition_lines(batch):
+    lines = []
+    if batch["required_group_id"] and (batch["required_group_messages"] or 0) > 0:
+        lines.append(
+            "群发言数：在 {0} 中总发言数必须大于 {1}".format(
+                batch["required_group_id"],
+                batch["required_group_messages"],
+            )
+        )
+    if batch["required_channel_id"]:
+        lines.append("频道关注：必须关注 {0}".format(batch["required_channel_id"]))
+    if not lines:
+        return ["领取条件：无额外条件"]
+    return ["领取条件："] + lines
+
+
+def record_group_message(message):
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
+    chat_type = chat.get("type")
+    if chat_type not in ("group", "supergroup"):
+        return
+    if not user.get("id") or user.get("is_bot"):
+        return
+    current = now_text()
+    chat_id = str(chat.get("id"))
+    with db_connect() as conn:
+        upsert_user(conn, user)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO user_chat_stats
+                (telegram_id, chat_id, message_count, first_seen_at, last_seen_at)
+            VALUES (?, ?, 0, ?, ?)
+            """,
+            (user["id"], chat_id, current, current),
+        )
+        conn.execute(
+            """
+            UPDATE user_chat_stats
+            SET message_count = message_count + 1, last_seen_at = ?
+            WHERE telegram_id = ? AND chat_id = ?
+            """,
+            (current, user["id"], chat_id),
+        )
+
+
+def member_is_joined(member):
+    if not member:
+        return False
+    status = member.get("status")
+    if status in ("creator", "administrator", "member"):
+        return True
+    if status == "restricted":
+        return bool(member.get("is_member", True))
+    return False
+
+
+def check_claim_conditions(conn, user, batch):
+    group_id = batch["required_group_id"]
+    group_messages = batch["required_group_messages"] or 0
+    if group_id and group_messages > 0:
+        row = conn.execute(
+            """
+            SELECT message_count
+            FROM user_chat_stats
+            WHERE telegram_id = ? AND chat_id = ?
+            """,
+            (user["id"], str(group_id)),
+        ).fetchone()
+        message_count = row["message_count"] if row else 0
+        if message_count <= group_messages:
+            return (
+                False,
+                "group_messages_not_enough",
+                "领取失败：你在指定群聊中的累计发言数是 {0}，需要大于 {1} 才能领取。".format(
+                    message_count,
+                    group_messages,
+                ),
+            )
+
+    channel_id = batch["required_channel_id"]
+    if channel_id:
+        member = get_chat_member(channel_id, user["id"])
+        if not member_is_joined(member):
+            return (
+                False,
+                "channel_not_joined",
+                "领取失败：请先关注指定频道，然后重新打开领取链接。",
+            )
+
+    return True, None, None
+
+
 def log_claim(conn, user, batch, code, status, captcha_passed, reason):
     conn.execute(
         """
@@ -312,6 +473,7 @@ def configure_bot_menu():
         {"command": "batch", "description": "查看批次详情"},
         {"command": "records", "description": "查看最近领取记录"},
         {"command": "flow", "description": "查看核心流程"},
+        {"command": "chatid", "description": "查看当前群聊 ID"},
     ]
     api_call("deleteWebhook", {"drop_pending_updates": "false"})
     api_call("setMyCommands", {"commands": json.dumps(user_commands, ensure_ascii=False)})
@@ -348,13 +510,14 @@ def handle_flow(chat_id, user_id):
         "1. 管理员点击「创建兑换码批次」\n"
         "2. 填写批次名称\n"
         "3. 选择兑换码类型：使用次数 / 领完为止\n"
-        "4. 按提示导入兑换码\n"
-        "5. Bot 自动生成唯一领取链接\n"
-        "6. 管理员复制链接，发到频道、群聊或私聊\n"
-        "7. 用户只能通过这个链接进入领取\n"
-        "8. 用户回答个位数加减法验证\n"
-        "9. 系统校验资格并自动发放兑换码\n"
-        "10. 系统记录领取日志，管理员可查看\n\n"
+        "4. 设置领取条件：群发言数 / 频道关注 / 无条件\n"
+        "5. 按提示导入兑换码\n"
+        "6. Bot 自动生成唯一领取链接\n"
+        "7. 管理员复制链接，发到频道、群聊或私聊\n"
+        "8. 用户只能通过这个链接进入领取\n"
+        "9. 用户回答个位数加减法验证\n"
+        "10. 系统校验领取条件并自动发放兑换码\n"
+        "11. 系统记录领取日志，管理员可查看\n\n"
         "普通用户没有领取菜单，也不能靠命令主动领取。",
         admin_keyboard(),
     )
@@ -364,7 +527,7 @@ def begin_new_batch(chat_id, user_id):
     ADMIN_STATES[user_id] = {"action": "newbatch", "step": "name", "data": {}}
     send_message(
         chat_id,
-        "创建批次：第 1 步 / 共 4 步\n\n"
+        "创建批次：第 1 步 / 共 5 步\n\n"
         "请先输入批次名称。\n\n"
         "例如：7 月新用户福利、频道活动兑换码、测试批次",
         admin_keyboard(),
@@ -391,10 +554,24 @@ def finish_usage_batch(chat_id, user_id, state, text):
         conn.execute(
             """
             INSERT INTO batches
-                (token, name, batch_type, shared_code, usage_limit, usage_count, created_by, created_at)
-            VALUES (?, ?, 'usage', ?, ?, 0, ?, ?)
+                (
+                    token, name, batch_type, shared_code, usage_limit, usage_count,
+                    required_group_id, required_group_messages, required_channel_id,
+                    created_by, created_at
+                )
+            VALUES (?, ?, 'usage', ?, ?, 0, ?, ?, ?, ?, ?)
             """,
-            (token, state["data"]["name"], code, usage_limit, user_id, current),
+            (
+                token,
+                state["data"]["name"],
+                code,
+                usage_limit,
+                state["data"].get("required_group_id"),
+                state["data"].get("required_group_messages", 0),
+                state["data"].get("required_channel_id"),
+                user_id,
+                current,
+            ),
         )
     ADMIN_STATES.pop(user_id, None)
     send_message(
@@ -403,10 +580,12 @@ def finish_usage_batch(chat_id, user_id, state, text):
         "批次名称：{0}\n"
         "类型：使用次数\n"
         "可用次数：{1}\n"
-        "领取链接：\n{2}\n\n"
+        "{2}\n"
+        "领取链接：\n{3}\n\n"
         "下一步：复制这条链接发给用户。用户只能通过这条链接领取，领取前需要回答一道个位数加减法验证题。".format(
             html.escape(state["data"]["name"]),
             usage_limit,
+            "\n".join(condition_lines(state["data"])),
             create_batch_link(token),
         ),
         admin_keyboard(),
@@ -432,10 +611,23 @@ def finish_unique_batch(chat_id, user_id, state, text):
     with db_connect() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO batches (token, name, batch_type, created_by, created_at)
-            VALUES (?, ?, 'unique', ?, ?)
+            INSERT INTO batches
+                (
+                    token, name, batch_type,
+                    required_group_id, required_group_messages, required_channel_id,
+                    created_by, created_at
+                )
+            VALUES (?, ?, 'unique', ?, ?, ?, ?, ?)
             """,
-            (token, state["data"]["name"], user_id, current),
+            (
+                token,
+                state["data"]["name"],
+                state["data"].get("required_group_id"),
+                state["data"].get("required_group_messages", 0),
+                state["data"].get("required_channel_id"),
+                user_id,
+                current,
+            ),
         )
         batch_id = cursor.lastrowid
         for code in codes:
@@ -451,11 +643,13 @@ def finish_unique_batch(chat_id, user_id, state, text):
         "类型：领完为止\n"
         "导入数量：{1}\n"
         "重复跳过：{2}\n"
-        "领取链接：\n{3}\n\n"
+        "{3}\n"
+        "领取链接：\n{4}\n\n"
         "下一步：复制这条链接发给用户。每个兑换码只会发放一次，领完后自动停止。".format(
             html.escape(state["data"]["name"]),
             len(codes),
             duplicated,
+            "\n".join(condition_lines(state["data"])),
             create_batch_link(token),
         ),
         admin_keyboard(),
@@ -483,7 +677,7 @@ def handle_new_batch_state(chat_id, user_id, text):
         state["step"] = "type"
         send_message(
             chat_id,
-            "创建批次：第 2 步 / 共 4 步\n\n"
+            "创建批次：第 2 步 / 共 5 步\n\n"
             "请选择兑换码类型：\n\n"
             "使用次数：只有一个兑换码，可被多个用户领取，达到次数上限后停止。\n"
             "领完为止：导入多个兑换码，每个兑换码只发给一个用户。",
@@ -501,11 +695,32 @@ def handle_new_batch_state(chat_id, user_id, text):
             send_message(chat_id, "请点击「使用次数」或「领完为止」，也可以发送 usage 或 unique。")
             return True
         state["data"]["batch_type"] = value
+        state["step"] = "conditions"
+        send_message(
+            chat_id,
+            "创建批次：第 3 步 / 共 5 步\n\n"
+            "请设置领取条件，按 3 行发送：\n"
+            "第一行：群 ID。没有群发言条件就填 0\n"
+            "第二行：群发言数阈值。用户发言数必须大于这个数；没有就填 0\n"
+            "第三行：频道用户名或频道 ID。没有频道关注条件就填 0\n\n"
+            "示例 1，无额外条件：\n0\n0\n0\n\n"
+            "示例 2，群发言数大于 5 且关注频道：\n-1001234567890\n5\n@your_channel\n\n"
+            "提示：把 Bot 拉进群后，在群里发送 /chatid 可以获取群 ID。",
+        )
+        return True
+
+    if step == "conditions":
+        try:
+            conditions = parse_batch_conditions(text)
+        except ValueError as exc:
+            send_message(chat_id, str(exc))
+            return True
+        state["data"].update(conditions)
         state["step"] = "codes"
-        if value == "usage":
+        if state["data"]["batch_type"] == "usage":
             send_message(
                 chat_id,
-                "创建批次：第 3 步 / 共 4 步\n\n"
+                "创建批次：第 4 步 / 共 5 步\n\n"
                 "请按两行发送：\n"
                 "第一行：可使用次数\n"
                 "第二行：兑换码\n\n"
@@ -514,7 +729,7 @@ def handle_new_batch_state(chat_id, user_id, text):
         else:
             send_message(
                 chat_id,
-                "创建批次：第 3 步 / 共 4 步\n\n"
+                "创建批次：第 4 步 / 共 5 步\n\n"
                 "请批量发送兑换码，每行一个：\n\n"
                 "CODE001\nCODE002\nCODE003",
             )
@@ -635,6 +850,7 @@ def show_batch_detail(chat_id, user_id, text):
         "类型：{0}".format(batch["batch_type"]),
         "状态：{0}".format(batch["status"]),
         "库存：{0}".format(stock),
+        "\n".join(condition_lines(batch)),
         "成功领取：{0}".format(success_count),
         "失败记录：{0}".format(failed_count),
         "创建时间：{0}".format(batch["created_at"]),
@@ -721,9 +937,14 @@ def begin_claim(chat_id, user, token):
     send_message(
         chat_id,
         "你正在领取：{0}\n\n"
+        "{1}\n\n"
         "领取流程：完成验证 → 校验资格 → 自动发放兑换码。\n\n"
         "请完成下面的验证题：\n"
-        "{1}".format(html.escape(batch["name"]), html.escape(question)),
+        "{2}".format(
+            html.escape(batch["name"]),
+            "\n".join(condition_lines(batch)),
+            html.escape(question),
+        ),
         verify_keyboard(verify_token, answer),
     )
 
@@ -762,6 +983,13 @@ def issue_code(chat_id, user, batch_token):
                     html.escape(previous["code"] or "")
                 ),
             )
+            return
+
+        conditions_ok, reason, message = check_claim_conditions(conn, user, batch)
+        if not conditions_ok:
+            log_claim(conn, user, batch, None, "failed", 1, reason)
+            conn.execute("COMMIT")
+            send_message(chat_id, message)
             return
 
         if batch["batch_type"] == "usage":
@@ -875,6 +1103,19 @@ def handle_start(chat_id, user, text):
     begin_claim(chat_id, user, token)
 
 
+def handle_chatid(chat_id, message):
+    chat = message.get("chat") or {}
+    title = chat.get("title") or chat.get("username") or "当前会话"
+    send_message(
+        chat_id,
+        "{0}\nChat ID：<code>{1}</code>\n\n"
+        "如果要设置群发言数条件，请把这个 Chat ID 填到批次领取条件的第一行。".format(
+            html.escape(title),
+            html.escape(str(chat_id)),
+        ),
+    )
+
+
 def process_message(message):
     chat = message.get("chat") or {}
     user = message.get("from") or {}
@@ -883,6 +1124,8 @@ def process_message(message):
     user_id = user.get("id")
     if not chat_id or not user_id:
         return
+
+    record_group_message(message)
 
     if handle_new_batch_state(chat_id, user_id, text):
         return
@@ -894,6 +1137,8 @@ def process_message(message):
         handle_start(chat_id, user, text)
     elif text.startswith("/admin"):
         handle_admin(chat_id, user_id)
+    elif text.startswith("/chatid"):
+        handle_chatid(chat_id, message)
     elif text.startswith("/newbatch") or text == "创建批次" or text == "创建兑换码批次":
         if is_admin(user_id):
             begin_new_batch(chat_id, user_id)
