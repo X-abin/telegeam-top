@@ -539,6 +539,10 @@ def is_admin(user_id):
     return user_id in ADMIN_IDS
 
 
+def is_private_chat(chat):
+    return (chat or {}).get("type") == "private"
+
+
 def upsert_user(conn, user):
     current = now_text()
     conn.execute(
@@ -692,10 +696,19 @@ def configure_bot_menu():
         {"command": "batch", "description": "查看批次详情"},
         {"command": "records", "description": "查看最近领取记录"},
         {"command": "flow", "description": "查看核心流程"},
-        {"command": "chatid", "description": "查看当前群聊 ID"},
+        {"command": "chatid", "description": "查看当前会话 ID"},
     ]
     api_call("deleteWebhook", {"drop_pending_updates": "false"})
-    api_call("setMyCommands", {"commands": json.dumps(user_commands, ensure_ascii=False)})
+    api_call("deleteMyCommands")
+    api_call("deleteMyCommands", {"scope": json.dumps({"type": "all_group_chats"})})
+    api_call("deleteMyCommands", {"scope": json.dumps({"type": "all_chat_administrators"})})
+    api_call(
+        "setMyCommands",
+        {
+            "scope": json.dumps({"type": "all_private_chats"}),
+            "commands": json.dumps(user_commands, ensure_ascii=False),
+        },
+    )
     for admin_id in ADMIN_IDS:
         api_call(
             "setMyCommands",
@@ -1070,6 +1083,9 @@ def handle_callback(callback_query):
     user_id = user.get("id")
     data = callback_query.get("data") or ""
     if not callback_id or not chat_id or not user_id:
+        return
+    if not is_private_chat(chat):
+        answer_callback_query(callback_id, "请私聊使用机器人。")
         return
     if data.startswith("draft:"):
         handle_draft_callback(callback_query)
@@ -1600,7 +1616,7 @@ def handle_chatid(chat_id, message):
     send_message(
         chat_id,
         "<b>💬 {0}</b>\n\nChat ID：<code>{1}</code>\n\n"
-        "<i>创建批次或设置默认条件时，点击“群 ID”按钮后填入这个值。</i>".format(
+        "<i>Bot 现在只在私聊响应；群聊中只会静默统计发言数。</i>".format(
             html.escape(title),
             html.escape(str(chat_id)),
         ),
@@ -1629,6 +1645,9 @@ def process_message(message):
         return
 
     record_group_message(message)
+
+    if not is_private_chat(chat):
+        return
 
     if handle_newbatch_v2_state(chat_id, user_id, text):
         return
