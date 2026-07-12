@@ -549,7 +549,7 @@ def show_batch_condition_screen(chat_id, user_id, message_id=None):
         "<b>当前领取条件</b>\n"
         + "\n".join(render_condition_lines(state["data"]))
         + "\n\n"
-        "<blockquote>群发言数可从“📊 已记录群”获取群 ID。公开频道可填 @用户名 或 t.me 链接；私密邀请链接请填 chat_id + 邀请链接。</blockquote>"
+        "<blockquote>群发言条件使用“群 ID”；频道订阅条件使用频道/群的订阅检测 ID。两者可以不同，请分别设置。</blockquote>"
     )
     if message_id:
         edit_message_text(chat_id, message_id, text, condition_edit_keyboard())
@@ -604,20 +604,19 @@ def condition_edit_keyboard():
     return {
         "inline_keyboard": [
             [
-                {"text": "✏️ 群 ID", "callback_data": "draft:group_id"},
-                {"text": "✏️ 发言数", "callback_data": "draft:group_messages"},
-            ],
-            [
+                {"text": "💬 群发言条件", "callback_data": "draft:group_condition"},
                 {"text": "📢 频道订阅", "callback_data": "draft:channel_id"},
-                {"text": "📥 载入默认", "callback_data": "draft:load_defaults"},
             ],
             [
+                {"text": "📥 载入默认", "callback_data": "draft:load_defaults"},
                 {"text": "🧹 清空", "callback_data": "draft:clear_conditions"},
+            ],
+            [
                 {"text": "✅ 继续", "callback_data": "draft:continue"},
+                {"text": "⚙️ 默认值", "callback_data": "draft:open_defaults"},
             ],
             [
                 {"text": "⬅️ 上一步", "callback_data": "draft:back_type"},
-                {"text": "⚙️ 默认值", "callback_data": "draft:open_defaults"},
             ],
         ]
     }
@@ -627,14 +626,11 @@ def defaults_keyboard():
     return {
         "inline_keyboard": [
             [
-                {"text": "✏️ 群 ID", "callback_data": "defaults:group_id"},
-                {"text": "✏️ 发言数", "callback_data": "defaults:group_messages"},
-            ],
-            [
+                {"text": "💬 群发言条件", "callback_data": "defaults:group_condition"},
                 {"text": "📢 频道订阅", "callback_data": "defaults:channel_id"},
-                {"text": "🧹 清空", "callback_data": "defaults:clear"},
             ],
             [
+                {"text": "🧹 清空", "callback_data": "defaults:clear"},
                 {"text": "✅ 完成", "callback_data": "defaults:done"},
             ],
         ]
@@ -1497,8 +1493,6 @@ def show_flow_v2(chat_id, user_id):
 
 def ask_condition_value(chat_id, field):
     prompt_map = {
-        "required_group_id": "<b>✏️ 设置群 ID</b>\n\n请输入群 ID，或输入 <code>0</code> 清空。",
-        "required_group_messages": "<b>✏️ 设置群发言数</b>\n\n请输入阈值，用户累计发言数必须 <b>大于</b> 这个数字。\n输入 <code>0</code> 表示不启用。",
         "required_channel_id": (
             "<b>📢 设置频道订阅</b>\n\n"
             "公开频道：发送 <code>@channel</code> 或 <code>https://t.me/channel</code>\n"
@@ -1508,6 +1502,27 @@ def ask_condition_value(chat_id, field):
         ),
     }
     return prompt_map.get(field, "请输入内容。")
+
+
+def ask_group_condition_id():
+    return (
+        "<b>💬 设置群发言条件</b>\n\n"
+        "<b>第 1 步 / 共 2 步</b>\n"
+        "请发送要统计发言的<b>群 ID</b>。\n\n"
+        "可点击 <code>📊 已记录群</code> 查看 Bot 已记录到的群 ID。\n"
+        "<blockquote>群 ID 用于统计群内发言；频道订阅 ID 用于检测订阅，两者可以不同。</blockquote>\n"
+        "输入 <code>0</code> 表示不启用群发言条件。"
+    )
+
+
+def ask_group_condition_messages(group_id):
+    return (
+        "<b>💬 设置群发言条件</b>\n\n"
+        "<b>第 2 步 / 共 2 步</b>\n"
+        "群 ID：<code>{0}</code>\n\n"
+        "请输入最低发言数，用户累计发言数必须 <b>大于</b> 这个数字才能领取。\n"
+        "<i>示例：</i> <code>5</code>"
+    ).format(html.escape(str(group_id)))
 
 
 def apply_condition_input(state, field, text):
@@ -1683,6 +1698,37 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         show_batch_condition_screen(chat_id, user_id)
         return True
 
+    if state["step"] == "group_condition_id":
+        group_id = normalize_chat_id_text(text)
+        if not group_id:
+            state["data"]["required_group_id"] = None
+            state["data"]["required_group_messages"] = 0
+            state["step"] = "conditions"
+            state["pending_group_id"] = None
+            show_batch_condition_screen(chat_id, user_id)
+            return True
+        state["pending_group_id"] = group_id
+        state["step"] = "group_condition_messages"
+        send_flow_message(chat_id, user_id, ask_group_condition_messages(group_id), admin_keyboard())
+        return True
+
+    if state["step"] == "group_condition_messages":
+        try:
+            group_messages = parse_nonnegative_int(text, "群发言数")
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc))
+            return True
+        if group_messages <= 0:
+            send_flow_message(chat_id, user_id, "群发言数必须大于 0；如需关闭条件，请重新点击群发言条件并输入 0。")
+            return True
+        state["data"]["required_group_id"] = state.get("pending_group_id")
+        state["data"]["required_group_messages"] = group_messages
+        state["pending_group_id"] = None
+        state["step"] = "conditions"
+        normalize_condition_data(state["data"])
+        show_batch_condition_screen(chat_id, user_id)
+        return True
+
     if state["step"] == "usage_limit":
         try:
             usage_limit = parse_nonnegative_int(text, "可用次数")
@@ -1777,6 +1823,43 @@ def handle_defaults_state(chat_id, user_id, text):
         show_defaults_screen(chat_id, user_id)
         return True
 
+    if state["step"] == "group_condition_id":
+        group_id = normalize_chat_id_text(text)
+        if not group_id:
+            state["data"]["required_group_id"] = None
+            state["data"]["required_group_messages"] = 0
+            with db_connect() as conn:
+                set_setting(conn, "default_required_group_id", "")
+                set_setting(conn, "default_required_group_messages", "0")
+            state["step"] = "menu"
+            state["pending_group_id"] = None
+            show_defaults_screen(chat_id, user_id)
+            return True
+        state["pending_group_id"] = group_id
+        state["step"] = "group_condition_messages"
+        send_flow_message(chat_id, user_id, ask_group_condition_messages(group_id), admin_keyboard())
+        return True
+
+    if state["step"] == "group_condition_messages":
+        try:
+            group_messages = parse_nonnegative_int(text, "群发言数")
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc))
+            return True
+        if group_messages <= 0:
+            send_flow_message(chat_id, user_id, "群发言数必须大于 0；如需关闭条件，请重新点击群发言条件并输入 0。")
+            return True
+        state["data"]["required_group_id"] = state.get("pending_group_id")
+        state["data"]["required_group_messages"] = group_messages
+        state["pending_group_id"] = None
+        normalize_condition_data(state["data"])
+        with db_connect() as conn:
+            set_setting(conn, "default_required_group_id", state["data"].get("required_group_id") or "")
+            set_setting(conn, "default_required_group_messages", str(state["data"].get("required_group_messages") or 0))
+        state["step"] = "menu"
+        show_defaults_screen(chat_id, user_id)
+        return True
+
     return False
 
 
@@ -1794,14 +1877,10 @@ def handle_draft_callback(callback_query):
         return
 
     answer_callback_query(callback_query.get("id"))
-    if data == "group_id":
-        state["step"] = "condition_input"
-        state["pending_field"] = "required_group_id"
-        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_group_id"), admin_keyboard())
-    elif data == "group_messages":
-        state["step"] = "condition_input"
-        state["pending_field"] = "required_group_messages"
-        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_group_messages"), admin_keyboard())
+    if data == "group_condition":
+        state["step"] = "group_condition_id"
+        state["pending_group_id"] = None
+        send_flow_message(chat_id, user_id, ask_group_condition_id(), admin_keyboard())
     elif data == "channel_id":
         state["step"] = "condition_input"
         state["pending_field"] = "required_channel_id"
@@ -1887,13 +1966,13 @@ def handle_defaults_callback(callback_query):
         return
 
     answer_callback_query(callback_query.get("id"))
-    if data in ("group_id", "group_messages", "channel_id"):
+    if data == "group_condition":
+        state["step"] = "group_condition_id"
+        state["pending_group_id"] = None
+        send_flow_message(chat_id, user_id, ask_group_condition_id(), admin_keyboard())
+    elif data == "channel_id":
         state["step"] = "edit"
-        state["pending_field"] = {
-            "group_id": "required_group_id",
-            "group_messages": "required_group_messages",
-            "channel_id": "required_channel_id",
-        }[data]
+        state["pending_field"] = "required_channel_id"
         send_flow_message(chat_id, user_id, ask_condition_value(chat_id, state["pending_field"]), admin_keyboard())
     elif data == "clear":
         state["data"]["required_group_id"] = None
