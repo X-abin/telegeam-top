@@ -126,6 +126,7 @@ def init_db():
                 required_group_id TEXT,
                 required_group_messages INTEGER NOT NULL DEFAULT 0,
                 required_channel_id TEXT,
+                required_channel_link TEXT,
                 created_by INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 CHECK (batch_type IN ('usage', 'unique')),
@@ -188,6 +189,18 @@ def init_db():
             "ALTER TABLE batches ADD COLUMN required_group_messages INTEGER NOT NULL DEFAULT 0",
         )
         ensure_column(conn, "batches", "required_channel_id", "ALTER TABLE batches ADD COLUMN required_channel_id TEXT")
+        ensure_column(conn, "batches", "required_channel_link", "ALTER TABLE batches ADD COLUMN required_channel_link TEXT")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS chat_infos (
+                chat_id TEXT PRIMARY KEY,
+                title TEXT,
+                username TEXT,
+                chat_type TEXT,
+                last_seen_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def api_call(method, data=None):
@@ -296,6 +309,103 @@ def parse_nullable_text(value):
     return value
 
 
+def is_invite_link(value):
+    value = (value or "").strip()
+    return value.startswith("https://t.me/+") or value.startswith("http://t.me/+") or "t.me/joinchat/" in value
+
+
+def public_tme_username(value):
+    value = (value or "").strip()
+    for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
+        if value.startswith(prefix):
+            slug = value[len(prefix):].strip("/")
+            if slug and not slug.startswith("+") and not slug.startswith("joinchat/") and "/" not in slug:
+                return slug
+    return None
+
+
+def default_subscription_link(target):
+    if not target:
+        return None
+    if str(target).startswith("@"):
+        return "https://t.me/{0}".format(str(target)[1:])
+    return None
+
+
+def normalize_chat_id_text(value):
+    value = parse_nullable_text(value)
+    if not value:
+        return None
+    if value.isdigit() and value.startswith("100") and len(value) > 10:
+        return "-{0}".format(value)
+    return value
+
+
+def data_value(data, key, default=None):
+    try:
+        return data.get(key, default)
+    except AttributeError:
+        try:
+            return data[key]
+        except Exception:
+            return default
+
+
+def parse_subscription_input(value):
+    value = (value or "").strip()
+    if parse_nullable_text(value) is None:
+        return None, None
+
+    parts = value.split()
+    link = None
+    target = None
+    for part in parts:
+        if part.startswith("https://") or part.startswith("http://") or part.startswith("t.me/"):
+            link = part
+            username = public_tme_username(part)
+            if username and target is None:
+                target = "@{0}".format(username)
+        elif target is None:
+            target = normalize_chat_id_text(part)
+
+    if len(parts) == 1:
+        single = parts[0]
+        if is_invite_link(single):
+            raise ValueError(
+                "私密邀请链接不能单独用于检测订阅。\n\n"
+                "请发送：<code>频道或群 chat_id 邀请链接</code>\n"
+                "示例：<code>-1001234567890 https://t.me/+xxxx</code>"
+            )
+        username = public_tme_username(single)
+        if username:
+            target = "@{0}".format(username)
+            link = single if single.startswith("http") else "https://t.me/{0}".format(username)
+        else:
+            target = normalize_chat_id_text(single)
+            link = default_subscription_link(target)
+    elif link and is_invite_link(link) and not target:
+        raise ValueError("私密邀请链接需要同时填写可检测的频道或群 chat_id。")
+
+    target = normalize_chat_id_text(target)
+    link = parse_nullable_text(link)
+    if target and (target.startswith("https://") or target.startswith("http://") or target.startswith("t.me/")):
+        username = public_tme_username(target)
+        if username:
+            target = "@{0}".format(username)
+            link = link or "https://t.me/{0}".format(username)
+        else:
+            raise ValueError("订阅检测目标不能只填写私密邀请链接，请同时填写 chat_id。")
+    return target, link
+
+
+def subscription_display_html(data):
+    target = data_value(data, "required_channel_id")
+    link = data_value(data, "required_channel_link") or default_subscription_link(target)
+    if link:
+        return '<a href="{0}">打开订阅入口</a>'.format(html.escape(str(link), quote=True))
+    return "<b>{0}</b>".format(html.escape(str(target)))
+
+
 def parse_nonnegative_int(value, field_name):
     try:
         number = int(str(value).strip())
@@ -308,16 +418,27 @@ def parse_nonnegative_int(value, field_name):
 
 def normalize_condition_data(data):
     group_messages = int(data.get("required_group_messages") or 0)
-    group_id = parse_nullable_text(data.get("required_group_id"))
+    group_id = normalize_chat_id_text(data.get("required_group_id"))
     if group_messages <= 0:
         group_id = None
         group_messages = 0
     elif not group_id:
         raise ValueError("启用群发言数条件时，必须填写群 ID。")
     channel_id = parse_nullable_text(data.get("required_channel_id"))
+    channel_link = parse_nullable_text(data.get("required_channel_link"))
+    if channel_id and (channel_id.startswith("http://") or channel_id.startswith("https://") or channel_id.startswith("t.me/")):
+        try:
+            channel_id, parsed_link = parse_subscription_input(channel_id)
+            channel_link = channel_link or parsed_link
+        except ValueError:
+            channel_link = channel_link or channel_id
+            channel_id = None
+    if channel_id and not channel_link:
+        channel_link = default_subscription_link(channel_id)
     data["required_group_id"] = group_id
     data["required_group_messages"] = group_messages
     data["required_channel_id"] = channel_id
+    data["required_channel_link"] = channel_link
     return data
 
 
@@ -326,6 +447,7 @@ def load_default_conditions(conn):
         "required_group_id": parse_nullable_text(get_setting(conn, "default_required_group_id", "")),
         "required_group_messages": int(get_setting(conn, "default_required_group_messages", "0") or 0),
         "required_channel_id": parse_nullable_text(get_setting(conn, "default_required_channel_id", "")),
+        "required_channel_link": parse_nullable_text(get_setting(conn, "default_required_channel_link", "")),
     }
     try:
         return normalize_condition_data(data)
@@ -334,6 +456,7 @@ def load_default_conditions(conn):
             "required_group_id": None,
             "required_group_messages": 0,
             "required_channel_id": None,
+            "required_channel_link": None,
         }
 
 
@@ -347,9 +470,10 @@ def render_condition_lines(data):
     else:
         lines.append("• <b>群发言数</b>：<i>未启用</i>")
     if channel_id:
-        lines.append("• <b>频道关注</b>：必须关注 <b>{0}</b>".format(html.escape(str(channel_id))))
+        lines.append("• <b>频道订阅</b>：必须订阅 {0}".format(subscription_display_html(data)))
+        lines.append("  检测目标：<code>{0}</code>".format(html.escape(str(channel_id))))
     else:
-        lines.append("• <b>频道关注</b>：<i>未启用</i>")
+        lines.append("• <b>频道订阅</b>：<i>未启用</i>")
     return lines
 
 
@@ -425,7 +549,7 @@ def show_batch_condition_screen(chat_id, user_id, message_id=None):
         "<b>当前领取条件</b>\n"
         + "\n".join(render_condition_lines(state["data"]))
         + "\n\n"
-        "<blockquote>需要群发言数时，请先设置群 ID，再设置发言数。频道可填写 @用户名或频道 ID。</blockquote>"
+        "<blockquote>群发言数可从“📊 已记录群”获取群 ID。公开频道可填 @用户名 或 t.me 链接；私密邀请链接请填 chat_id + 邀请链接。</blockquote>"
     )
     if message_id:
         edit_message_text(chat_id, message_id, text, condition_edit_keyboard())
@@ -457,7 +581,8 @@ def admin_keyboard():
         "keyboard": [
             [{"text": "📦 创建批次"}, {"text": "📋 批次列表"}],
             [{"text": "⚙️ 默认条件"}, {"text": "🧭 核心流程"}],
-            [{"text": "🗒 最近记录"}, {"text": "⬅️ 取消"}],
+            [{"text": "📊 已记录群"}, {"text": "🗒 最近记录"}],
+            [{"text": "⬅️ 取消"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
@@ -483,7 +608,7 @@ def condition_edit_keyboard():
                 {"text": "✏️ 发言数", "callback_data": "draft:group_messages"},
             ],
             [
-                {"text": "📢 频道", "callback_data": "draft:channel_id"},
+                {"text": "📢 频道订阅", "callback_data": "draft:channel_id"},
                 {"text": "📥 载入默认", "callback_data": "draft:load_defaults"},
             ],
             [
@@ -506,7 +631,7 @@ def defaults_keyboard():
                 {"text": "✏️ 发言数", "callback_data": "defaults:group_messages"},
             ],
             [
-                {"text": "📢 频道", "callback_data": "defaults:channel_id"},
+                {"text": "📢 频道订阅", "callback_data": "defaults:channel_id"},
                 {"text": "🧹 清空", "callback_data": "defaults:clear"},
             ],
             [
@@ -606,7 +731,7 @@ def condition_lines(batch):
             )
         )
     if batch["required_channel_id"]:
-        lines.append("• <b>频道关注</b>：必须关注 <b>{0}</b>".format(html.escape(str(batch["required_channel_id"]))))
+        lines.append("• <b>频道订阅</b>：必须订阅 {0}".format(subscription_display_html(batch)))
     if not lines:
         lines.append("• <b>领取条件</b>：<i>无额外条件</i>")
     return ["<b>⚙️ 领取条件</b>"] + lines
@@ -622,8 +747,17 @@ def record_group_message(message):
         return
     current = now_text()
     chat_id = str(chat.get("id"))
+    title = chat.get("title") or chat.get("username") or chat_id
     with db_connect() as conn:
         upsert_user(conn, user)
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chat_infos
+                (chat_id, title, username, chat_type, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (chat_id, title, chat.get("username"), chat_type, current),
+        )
         conn.execute(
             """
             INSERT OR IGNORE INTO user_chat_stats
@@ -679,12 +813,22 @@ def check_claim_conditions(conn, user, batch):
 
     channel_id = batch["required_channel_id"]
     if channel_id:
+        if is_invite_link(str(channel_id)):
+            return (
+                False,
+                "subscription_target_invalid",
+                "<b>领取失败</b>\n\n当前频道订阅条件需要管理员重新配置：私密邀请链接不能单独作为检测目标。",
+            )
         member = get_chat_member(channel_id, user["id"])
         if not member_is_joined(member):
+            open_text = ""
+            channel_link = data_value(batch, "required_channel_link") or default_subscription_link(channel_id)
+            if channel_link:
+                open_text = "\n\n订阅入口：{0}".format(subscription_display_html(batch))
             return (
                 False,
                 "channel_not_joined",
-                "<b>领取失败</b>\n\n请先关注指定频道，然后重新打开领取链接。",
+                "<b>领取失败</b>\n\n请先完成频道订阅，然后重新打开领取链接。{0}".format(open_text),
             )
 
     return True, None, None
@@ -724,6 +868,7 @@ def configure_bot_menu():
         {"command": "batch", "description": "查看批次详情"},
         {"command": "records", "description": "查看最近领取记录"},
         {"command": "flow", "description": "查看核心流程"},
+        {"command": "groups", "description": "查看已记录群 ID"},
         {"command": "chatid", "description": "查看当前会话 ID"},
     ]
     api_call("deleteWebhook", {"drop_pending_updates": "false"})
@@ -942,6 +1087,110 @@ def show_records(chat_id, user_id):
             )
         )
     send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def show_seen_groups(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, "你不是管理员。")
+        return
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                c.chat_id,
+                c.title,
+                c.username,
+                c.chat_type,
+                c.last_seen_at,
+                COUNT(s.telegram_id) AS user_count,
+                COALESCE(SUM(s.message_count), 0) AS message_count
+            FROM chat_infos c
+            LEFT JOIN user_chat_stats s ON s.chat_id = c.chat_id
+            GROUP BY c.chat_id, c.title, c.username, c.chat_type, c.last_seen_at
+            ORDER BY c.last_seen_at DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    if not rows:
+        send_message(
+            chat_id,
+            "<b>📊 已记录群</b>\n\n"
+            "<i>暂时没有记录到群聊消息。</i>\n\n"
+            "请把 Bot 加入目标群，并确保 Bot 能收到群消息；如果是普通群消息，需要在 BotFather 关闭 privacy mode。",
+            admin_keyboard(),
+        )
+        return
+    lines = [
+        "<b>📊 已记录群</b>",
+        "<i>创建批次时，点击“群 ID”后复制这里的 Chat ID。</i>",
+    ]
+    for row in rows:
+        username = "@{0}".format(row["username"]) if row["username"] else "-"
+        lines.append(
+            "\n<b>{0}</b>\n"
+            "• Chat ID：<code>{1}</code>\n"
+            "• 类型：{2}\n"
+            "• 用户数：{3}\n"
+            "• 已统计发言：{4}\n"
+            "• 用户名：{5}\n"
+            "• 最近记录：{6}".format(
+                html.escape(row["title"] or row["chat_id"]),
+                html.escape(row["chat_id"]),
+                html.escape(row["chat_type"] or "-"),
+                row["user_count"] or 0,
+                row["message_count"] or 0,
+                html.escape(username),
+                html.escape(row["last_seen_at"] or "-"),
+            )
+        )
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def forwarded_chat_from_message(message):
+    chat = message.get("forward_from_chat")
+    if chat:
+        return chat
+    origin = message.get("forward_origin") or {}
+    if origin.get("chat"):
+        return origin.get("chat")
+    if origin.get("type") == "channel" and origin.get("chat"):
+        return origin.get("chat")
+    return None
+
+
+def handle_forwarded_chat(chat_id, user_id, message):
+    if not is_admin(user_id):
+        return False
+    forwarded_chat = forwarded_chat_from_message(message)
+    if not forwarded_chat or not forwarded_chat.get("id"):
+        return False
+    target_id = str(forwarded_chat.get("id"))
+    title = forwarded_chat.get("title") or forwarded_chat.get("username") or target_id
+    username = forwarded_chat.get("username")
+    current = now_text()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chat_infos
+                (chat_id, title, username, chat_type, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (target_id, title, username, forwarded_chat.get("type"), current),
+        )
+    link = "https://t.me/{0}".format(username) if username else ""
+    lines = [
+        "<b>📌 已识别转发来源</b>",
+        "",
+        "• 名称：{0}".format(html.escape(title)),
+        "• Chat ID：<code>{0}</code>".format(html.escape(target_id)),
+    ]
+    if link:
+        lines.append("• 公开链接：<code>{0}</code>".format(html.escape(link)))
+    lines.append("")
+    lines.append("<i>私密邀请链接可按这个格式设置：</i>")
+    lines.append("<code>{0} https://t.me/+xxxx</code>".format(html.escape(target_id)))
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+    return True
 
 
 def find_batch(conn, token):
@@ -1239,7 +1488,7 @@ def show_flow_v2(chat_id, user_id):
         "5. 导入兑换码并确认创建\n"
         "6. 分享专属领取链接\n"
         "7. 用户完成九宫格点击验证\n"
-        "8. 系统校验群发言数 / 频道关注条件\n"
+        "8. 系统校验群发言数 / 频道订阅条件\n"
         "9. 自动发放兑换码并记录日志\n\n"
         "<i>普通用户不会看到领取入口，只能通过专属链接领取。</i>",
         admin_keyboard(),
@@ -1250,7 +1499,13 @@ def ask_condition_value(chat_id, field):
     prompt_map = {
         "required_group_id": "<b>✏️ 设置群 ID</b>\n\n请输入群 ID，或输入 <code>0</code> 清空。",
         "required_group_messages": "<b>✏️ 设置群发言数</b>\n\n请输入阈值，用户累计发言数必须 <b>大于</b> 这个数字。\n输入 <code>0</code> 表示不启用。",
-        "required_channel_id": "<b>📢 设置频道</b>\n\n请输入频道 <code>@用户名</code> 或频道 ID。\n输入 <code>0</code> 表示不启用。",
+        "required_channel_id": (
+            "<b>📢 设置频道订阅</b>\n\n"
+            "公开频道：发送 <code>@channel</code> 或 <code>https://t.me/channel</code>\n"
+            "私密邀请链接：发送 <code>chat_id 邀请链接</code>\n"
+            "示例：<code>-1001234567890 https://t.me/+xxxx</code>\n\n"
+            "输入 <code>0</code> 表示不启用。"
+        ),
     }
     return prompt_map.get(field, "请输入内容。")
 
@@ -1258,11 +1513,13 @@ def ask_condition_value(chat_id, field):
 def apply_condition_input(state, field, text):
     text = text.strip()
     if field == "required_group_id":
-        state["data"]["required_group_id"] = parse_nullable_text(text)
+        state["data"]["required_group_id"] = normalize_chat_id_text(text)
     elif field == "required_group_messages":
         state["data"]["required_group_messages"] = parse_nonnegative_int(text, "群发言数")
     elif field == "required_channel_id":
-        state["data"]["required_channel_id"] = parse_nullable_text(text)
+        target, link = parse_subscription_input(text)
+        state["data"]["required_channel_id"] = target
+        state["data"]["required_channel_link"] = link
     else:
         raise ValueError("未知条件字段。")
     normalize_condition_data(state["data"])
@@ -1299,10 +1556,10 @@ def create_batch_from_draft(chat_id, user_id):
                 INSERT INTO batches
                     (
                         token, name, batch_type, shared_code, usage_limit, usage_count,
-                        required_group_id, required_group_messages, required_channel_id,
+                        required_group_id, required_group_messages, required_channel_id, required_channel_link,
                         created_by, created_at
                     )
-                VALUES (?, ?, 'usage', ?, ?, 0, ?, ?, ?, ?, ?)
+                VALUES (?, ?, 'usage', ?, ?, 0, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token,
@@ -1312,6 +1569,7 @@ def create_batch_from_draft(chat_id, user_id):
                     data.get("required_group_id"),
                     int(data.get("required_group_messages") or 0),
                     data.get("required_channel_id"),
+                    data.get("required_channel_link"),
                     user_id,
                     current,
                 ),
@@ -1322,10 +1580,10 @@ def create_batch_from_draft(chat_id, user_id):
                 INSERT INTO batches
                     (
                         token, name, batch_type,
-                        required_group_id, required_group_messages, required_channel_id,
+                        required_group_id, required_group_messages, required_channel_id, required_channel_link,
                         created_by, created_at
                     )
-                VALUES (?, ?, 'unique', ?, ?, ?, ?, ?)
+                VALUES (?, ?, 'unique', ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     token,
@@ -1333,6 +1591,7 @@ def create_batch_from_draft(chat_id, user_id):
                     data.get("required_group_id"),
                     int(data.get("required_group_messages") or 0),
                     data.get("required_channel_id"),
+                    data.get("required_channel_link"),
                     user_id,
                     current,
                 ),
@@ -1512,6 +1771,7 @@ def handle_defaults_state(chat_id, user_id, text):
             set_setting(conn, "default_required_group_id", state["data"].get("required_group_id") or "")
             set_setting(conn, "default_required_group_messages", str(state["data"].get("required_group_messages") or 0))
             set_setting(conn, "default_required_channel_id", state["data"].get("required_channel_id") or "")
+            set_setting(conn, "default_required_channel_link", state["data"].get("required_channel_link") or "")
         state["step"] = "menu"
         state["pending_field"] = None
         show_defaults_screen(chat_id, user_id)
@@ -1554,6 +1814,7 @@ def handle_draft_callback(callback_query):
         state["data"]["required_group_id"] = None
         state["data"]["required_group_messages"] = 0
         state["data"]["required_channel_id"] = None
+        state["data"]["required_channel_link"] = None
         show_batch_condition_screen(chat_id, user_id, message_id)
     elif data == "continue":
         if state["data"]["batch_type"] == "usage":
@@ -1638,10 +1899,12 @@ def handle_defaults_callback(callback_query):
         state["data"]["required_group_id"] = None
         state["data"]["required_group_messages"] = 0
         state["data"]["required_channel_id"] = None
+        state["data"]["required_channel_link"] = None
         with db_connect() as conn:
             set_setting(conn, "default_required_group_id", "")
             set_setting(conn, "default_required_group_messages", "0")
             set_setting(conn, "default_required_channel_id", "")
+            set_setting(conn, "default_required_channel_link", "")
         show_defaults_screen(chat_id, user_id, message_id)
     elif data == "done":
         return_state = state.get("return_state")
@@ -1696,6 +1959,10 @@ def process_message(message):
     if not is_private_chat(chat):
         return
 
+    if handle_forwarded_chat(chat_id, user_id, message):
+        delete_message(chat_id, message.get("message_id"))
+        return
+
     delete_message(chat_id, message.get("message_id"))
 
     if handle_newbatch_v2_state(chat_id, user_id, text):
@@ -1714,6 +1981,8 @@ def process_message(message):
         handle_whoami(chat_id, user)
     elif text.startswith("/chatid"):
         handle_chatid(chat_id, message)
+    elif text.startswith("/groups") or text in ("📊 已记录群", "已记录群"):
+        show_seen_groups(chat_id, user_id)
     elif text.startswith("/defaults") or text == "⚙️ 默认条件":
         begin_defaults_screen(chat_id, user_id)
     elif text.startswith("/newbatch") or text in ("创建批次", "创建兑换码批次", "📦 创建批次"):
