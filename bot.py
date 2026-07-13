@@ -3980,6 +3980,33 @@ def show_defaults_screen(chat_id, user_id, message_id=None):
         send_flow_message(chat_id, user_id, text, keyboard)
 
 
+def ensure_defaults_state(user_id, return_state=None):
+    state = ADMIN_STATES.get(user_id)
+    if state and state.get("action") == "defaults":
+        return state
+    with db_connect() as conn:
+        defaults = load_default_conditions(conn)
+    state = {
+        "action": "defaults",
+        "step": "menu",
+        "data": defaults,
+        "return_state": copy.deepcopy(return_state) if return_state else None,
+    }
+    ADMIN_STATES[user_id] = state
+    return state
+
+
+def begin_defaults_screen(chat_id, user_id, return_state=None):
+    if not is_admin(user_id):
+        send_message(chat_id, "你不是管理员。")
+        return
+    state = ensure_defaults_state(user_id, return_state)
+    state["step"] = "menu"
+    state["pending_field"] = None
+    state["pending_group_id"] = None
+    show_defaults_screen(chat_id, user_id)
+
+
 def handle_defaults_state(chat_id, user_id, text):
     state = ADMIN_STATES.get(user_id)
     if not state or state.get("action") != "defaults":
@@ -3991,8 +4018,9 @@ def handle_defaults_state(chat_id, user_id, text):
         return False
 
     if state["step"] == "menu":
-        send_flow_message(chat_id, user_id, "请点击面板按钮修改默认条件。", defaults_keyboard(state.get("return_state")))
-        return True
+        if not state.get("return_state"):
+            ADMIN_STATES.pop(user_id, None)
+        return False
 
     if state["step"] == "group_chat_choose":
         token = state.get("group_bind_token") or uuid.uuid4().hex[:12]
@@ -4063,8 +4091,10 @@ def handle_defaults_callback(callback_query):
     data = (callback_query.get("data") or "").split(":", 1)[1]
     state = ADMIN_STATES.get(user_id)
     if not state or state.get("action") != "defaults":
-        answer_callback_query(callback_query.get("id"), "请先打开默认条件面板。", show_alert=True)
-        return
+        if data == "done":
+            answer_callback_query(callback_query.get("id"))
+            return
+        state = ensure_defaults_state(user_id)
 
     answer_callback_query(callback_query.get("id"))
     if data in ("group_condition", "group_chat"):
