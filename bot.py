@@ -1814,6 +1814,9 @@ def handle_callback(callback_query):
     if data.startswith("defaults:"):
         handle_defaults_callback(callback_query)
         return
+    if data.startswith("page:"):
+        handle_page_callback(callback_query)
+        return
     if not data.startswith("captcha:"):
         answer_callback_query(callback_id)
         return
@@ -4631,18 +4634,101 @@ def show_flow_v2(chat_id, user_id):
     )
 
 
-def list_batches(chat_id, user_id):
+PAGINATION_MAX_ITEMS = 100
+PAGINATION_PAGE_SIZE = 10
+
+
+def parse_page_number(value):
+    try:
+        page = int(str(value))
+    except Exception:
+        page = 0
+    return max(page, 0)
+
+
+def total_pages_for(total, page_size=PAGINATION_PAGE_SIZE):
+    if total <= 0:
+        return 1
+    return (total + page_size - 1) // page_size
+
+
+def clamp_page(page, total, page_size=PAGINATION_PAGE_SIZE):
+    pages = total_pages_for(total, page_size)
+    return min(max(page, 0), pages - 1)
+
+
+def pagination_keyboard(kind, page, total, page_size=PAGINATION_PAGE_SIZE):
+    pages = total_pages_for(total, page_size)
+    row = []
+    if page > 0:
+        row.append({"text": "⬅️ 上一页", "callback_data": "page:{0}:{1}".format(kind, page - 1)})
+    row.append({"text": "{0}/{1}".format(page + 1, pages), "callback_data": "page:noop:0"})
+    if page + 1 < pages:
+        row.append({"text": "下一页 ➡️", "callback_data": "page:{0}:{1}".format(kind, page + 1)})
+    return {"inline_keyboard": [row]}
+
+
+def page_range_text(page, total, page_size=PAGINATION_PAGE_SIZE):
+    start = page * page_size + 1
+    end = min((page + 1) * page_size, total)
+    return "第 <b>{0}-{1}</b> 条 / 最近 {2} 条".format(start, end, ui_number(total))
+
+
+def send_or_edit_page(chat_id, message_id, text, keyboard):
+    if message_id:
+        result = safe_edit_message_text(chat_id, message_id, text, keyboard)
+        if result:
+            return
+    send_message(chat_id, text, keyboard)
+
+
+def handle_page_callback(callback_query):
+    callback_id = callback_query.get("id")
+    user = callback_query.get("from") or {}
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    user_id = user.get("id")
+    data = callback_query.get("data") or ""
+    parts = data.split(":")
+
+    if len(parts) < 3:
+        answer_callback_query(callback_id)
+        return
+    kind = parts[1]
+    if kind == "noop":
+        answer_callback_query(callback_id)
+        return
+    if not is_admin(user_id):
+        answer_callback_query(callback_id, "你不是管理员。", show_alert=True)
+        return
+
+    page = parse_page_number(parts[2])
+    answer_callback_query(callback_id)
+    if kind == "batches":
+        list_batches(chat_id, user_id, page=page, message_id=message_id)
+    elif kind == "records":
+        show_records(chat_id, user_id, page=page, message_id=message_id)
+
+
+def list_batches(chat_id, user_id, page=0, message_id=None):
     if not is_admin(user_id):
         send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
         return
     with db_connect() as conn:
+        total_count = conn.execute("SELECT COUNT(*) AS total FROM batches").fetchone()["total"] or 0
+        display_total = min(total_count, PAGINATION_MAX_ITEMS)
+        page = clamp_page(page, display_total)
+        offset = page * PAGINATION_PAGE_SIZE
         rows = conn.execute(
             """
             SELECT id, token, name, batch_type, usage_limit, usage_count, status, created_at
             FROM batches
             ORDER BY id DESC
-            LIMIT 10
-            """
+            LIMIT ? OFFSET ?
+            """,
+            (PAGINATION_PAGE_SIZE, offset),
         ).fetchall()
         stock_map = {}
         for row in rows:
@@ -4661,9 +4747,16 @@ def list_batches(chat_id, user_id):
                 ).fetchone()
                 stock_map[row["id"]] = "剩余 {0}/{1}".format(stock_row["available"] or 0, stock_row["total"] or 0)
     if not rows:
-        send_message(chat_id, "<b>📋 批次列表</b>\n\n<i>暂无批次。</i>", admin_keyboard())
+        text = "<b>📋 批次列表</b>\n\n<i>暂无批次。</i>"
+        keyboard = pagination_keyboard("batches", 0, 0) if message_id else admin_keyboard()
+        send_or_edit_page(chat_id, message_id, text, keyboard)
         return
-    lines = ["<b>📋 最近批次</b>"]
+    lines = [
+        "<b>📋 批次列表</b>",
+        ui_field("范围", page_range_text(page, display_total)),
+    ]
+    if total_count > PAGINATION_MAX_ITEMS:
+        lines.append("<i>只显示最近 100 个批次。</i>")
     for row in rows:
         lines.append(
             "\n<b>#{0}｜{1}</b>\n"
@@ -4679,7 +4772,12 @@ def list_batches(chat_id, user_id):
             )
         )
     lines.append("\n<i>查看详情：发送 <code>/batch 1</code></i>")
-    send_message(chat_id, "\n".join(lines), admin_keyboard())
+    send_or_edit_page(
+        chat_id,
+        message_id,
+        "\n".join(lines),
+        pagination_keyboard("batches", page, display_total),
+    )
 
 
 def show_batch_detail(chat_id, user_id, text):
@@ -4731,23 +4829,35 @@ def show_batch_detail(chat_id, user_id, text):
     send_message(chat_id, "\n".join(lines), admin_keyboard())
 
 
-def show_records(chat_id, user_id):
+def show_records(chat_id, user_id, page=0, message_id=None):
     if not is_admin(user_id):
         send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
         return
     with db_connect() as conn:
+        total_count = conn.execute("SELECT COUNT(*) AS total FROM claim_logs").fetchone()["total"] or 0
+        display_total = min(total_count, PAGINATION_MAX_ITEMS)
+        page = clamp_page(page, display_total)
+        offset = page * PAGINATION_PAGE_SIZE
         rows = conn.execute(
             """
             SELECT telegram_id, username, batch_token, code, status, captcha_passed, reason, created_at
             FROM claim_logs
             ORDER BY id DESC
-            LIMIT 15
-            """
+            LIMIT ? OFFSET ?
+            """,
+            (PAGINATION_PAGE_SIZE, offset),
         ).fetchall()
     if not rows:
-        send_message(chat_id, "<b>🗒 最近领取记录</b>\n\n<i>暂无领取记录。</i>", admin_keyboard())
+        text = "<b>🗒 最近领取记录</b>\n\n<i>暂无领取记录。</i>"
+        keyboard = pagination_keyboard("records", 0, 0) if message_id else admin_keyboard()
+        send_or_edit_page(chat_id, message_id, text, keyboard)
         return
-    lines = ["<b>🗒 最近领取记录</b>"]
+    lines = [
+        "<b>🗒 最近领取记录</b>",
+        ui_field("范围", page_range_text(page, display_total)),
+    ]
+    if total_count > PAGINATION_MAX_ITEMS:
+        lines.append("<i>只显示最近 100 条记录。</i>")
     for row in rows:
         username = "@{0}".format(row["username"]) if row["username"] else "-"
         result = row["code"] if row["status"] == "success" else reason_label(row["reason"])
@@ -4763,7 +4873,12 @@ def show_records(chat_id, user_id):
                 ui_field("结果", ui_code(result)),
             )
         )
-    send_message(chat_id, "\n".join(lines), admin_keyboard())
+    send_or_edit_page(
+        chat_id,
+        message_id,
+        "\n".join(lines),
+        pagination_keyboard("records", page, display_total),
+    )
 
 
 def show_seen_groups(chat_id, user_id):
