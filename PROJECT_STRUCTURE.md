@@ -31,3 +31,5 @@ telegram-bot/
 - 功能内部的返回、退出、完成、绑定都使用 InlineKeyboard。
 - 默认条件中，群聊绑定和发言数量拆成独立动作。
 - 频道订阅改为通过转发频道消息自动绑定。
+- 群聊绑定改为通过 `switch_inline_query_chosen_chat` 选择群聊，再由群内临时绑定消息回传 Chat ID。
+- 领取条件相关逻辑后续优先拆到 `app/handlers/defaults`、`app/handlers/batches`、`app/services/conditions`、`app/telegram/updates`。

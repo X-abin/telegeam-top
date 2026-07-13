@@ -318,6 +318,17 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     return api_call("answerCallbackQuery", data)
 
 
+def answer_inline_query(inline_query_id, results, cache_time=0, is_personal=True):
+    data = {
+        "inline_query_id": inline_query_id,
+        "results": json.dumps(results, ensure_ascii=False),
+        "cache_time": cache_time,
+    }
+    if is_personal:
+        data["is_personal"] = "true"
+    return api_call("answerInlineQuery", data)
+
+
 def edit_message_text(chat_id, message_id, text, reply_markup=None):
     data = {
         "chat_id": chat_id,
@@ -796,7 +807,7 @@ def batch_type_keyboard():
                 {"text": "🔁 使用次数", "callback_data": "draft:type_usage"},
                 {"text": "🎁 领完为止", "callback_data": "draft:type_unique"},
             ],
-            [{"text": "❌ 退出创建", "callback_data": "draft:cancel"}],
+            [{"text": "❌ 取消", "callback_data": "draft:cancel"}],
         ]
     }
 
@@ -804,16 +815,18 @@ def batch_type_keyboard():
 def draft_exit_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "❌ 退出创建", "callback_data": "draft:cancel"}],
+            [{"text": "❌ 取消", "callback_data": "draft:cancel"}],
         ]
     }
 
 
 def draft_input_keyboard(back_data=None):
-    rows = []
+    rows = [[{"text": "❌ 取消", "callback_data": "draft:cancel"}]]
     if back_data:
-        rows.append([{"text": "⬅️ 返回上一步", "callback_data": back_data}])
-    rows.append([{"text": "❌ 退出创建", "callback_data": "draft:cancel"}])
+        rows = [[
+            {"text": "⬅️ 返回", "callback_data": back_data},
+            {"text": "❌ 取消", "callback_data": "draft:cancel"},
+        ]]
     return {"inline_keyboard": rows}
 
 
@@ -3006,6 +3019,13 @@ def handle_defaults_state(chat_id, user_id, text):
         send_flow_message(chat_id, user_id, "请点击面板里的按钮修改默认条件，或点击完成退出。", defaults_keyboard())
         return True
 
+    if state["step"] == "group_chat_choose":
+        token = state.get("group_bind_token") or uuid.uuid4().hex[:12]
+        state["group_bind_token"] = token
+        state["private_chat_id"] = chat_id
+        send_flow_message(chat_id, user_id, ask_group_choose_prompt(), group_choose_keyboard("defaults", user_id, token))
+        return True
+
     if state["step"] == "edit":
         field = state.get("pending_field")
         if field == "required_channel_id" and text.strip() != "0":
@@ -3420,6 +3440,13 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         send_flow_message(chat_id, user_id, "请点击下方按钮选择批次类型。", batch_type_keyboard())
         return True
 
+    if state["step"] == "group_chat_choose":
+        token = state.get("group_bind_token") or uuid.uuid4().hex[:12]
+        state["group_bind_token"] = token
+        state["private_chat_id"] = chat_id
+        send_flow_message(chat_id, user_id, ask_group_choose_prompt(), group_choose_keyboard("draft", user_id, token))
+        return True
+
     if state["step"] == "condition_input":
         field = state.get("pending_field")
         if field == "required_channel_id" and text.strip() != "0":
@@ -3517,6 +3544,508 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     return False
 
 
+GROUP_BIND_QUERY_PREFIX = "bind_group"
+GROUP_BIND_COMMAND = "/bindgroup"
+
+
+def defaults_input_keyboard(back_data="defaults:back_menu"):
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "⬅️ 返回", "callback_data": back_data},
+                {"text": "✅ 完成", "callback_data": "defaults:done"},
+            ],
+        ]
+    }
+
+
+def render_condition_lines(data):
+    group_id = data.get("required_group_id")
+    group_messages = int(data.get("required_group_messages") or 0)
+    channel_id = data.get("required_channel_id")
+    lines = []
+    if group_id:
+        if group_messages > 0:
+            lines.append(
+                "• <b>群发言数</b>：<code>{0}</code> 中普通发言 <b>至少 {1}</b>".format(
+                    html.escape(str(group_id)),
+                    group_messages,
+                )
+            )
+        else:
+            lines.append(
+                "• <b>绑定群聊</b>：<code>{0}</code>\n"
+                "  发言数量：<i>未设置，暂不启用群发言限制</i>".format(html.escape(str(group_id)))
+            )
+    else:
+        lines.append("• <b>绑定群聊</b>：<i>未绑定</i>")
+        lines.append("• <b>发言数量</b>：<i>未设置</i>")
+    if channel_id:
+        lines.append("• <b>频道订阅</b>：必须订阅 {0}".format(subscription_display_html(data)))
+        lines.append("  检测目标：<code>{0}</code>".format(html.escape(str(channel_id))))
+    else:
+        lines.append("• <b>频道订阅</b>：<i>未启用</i>")
+    return lines
+
+
+def ask_group_chat_prompt():
+    return (
+        "<b>💬 手动绑定群聊</b>\n\n"
+        "请发送要统计发言的群聊 Chat ID。\n\n"
+        "群聊 ID 通常是 <code>-100...</code> 这样的负数；个人 User ID 不能用于这里。\n\n"
+        "<i>建议优先使用“选择群聊”按钮自动绑定。</i>"
+    )
+
+
+def ask_group_choose_prompt():
+    return (
+        "<b>💬 绑定群聊</b>\n\n"
+        "点击下方 <b>选择群聊</b>，在 Telegram 弹出的列表里选择目标群聊，"
+        "然后发送 Bot 提供的 <b>绑定这个群聊</b> 结果。\n\n"
+        "<blockquote>发送后 Bot 会静默删除群里的绑定消息，并在这里回写绑定结果。</blockquote>\n\n"
+        "<i>如果列表打不开，请先到 BotFather 开启 Inline Mode。</i>"
+    )
+
+
+def group_bind_query(user_id, token):
+    return "{0}:{1}:{2}".format(GROUP_BIND_QUERY_PREFIX, user_id, token)
+
+
+def parse_group_bind_query(query):
+    parts = (query or "").strip().split(":")
+    if len(parts) != 3 or parts[0] != GROUP_BIND_QUERY_PREFIX:
+        return None, None
+    try:
+        return int(parts[1]), parts[2]
+    except Exception:
+        return None, None
+
+
+def parse_group_bind_command(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    parts = text.split(None, 1)
+    command = parts[0].split("@", 1)[0]
+    if command != GROUP_BIND_COMMAND:
+        return None
+    return parts[1].strip() if len(parts) > 1 else None
+
+
+def group_bind_command_text(query):
+    command = GROUP_BIND_COMMAND
+    if BOT_USERNAME:
+        command = "{0}@{1}".format(command, BOT_USERNAME)
+    return "{0} {1}".format(command, query)
+
+
+def group_choose_keyboard(scope, user_id, token):
+    query = group_bind_query(user_id, token)
+    rows = [
+        [
+            {
+                "text": "💬 选择群聊",
+                "switch_inline_query_chosen_chat": {
+                    "query": query,
+                    "allow_user_chats": False,
+                    "allow_bot_chats": False,
+                    "allow_group_chats": True,
+                    "allow_channel_chats": False,
+                },
+            }
+        ],
+        [{"text": "⌨️ 手动输入", "callback_data": "{0}:manual_group_id".format(scope)}],
+    ]
+    if scope == "defaults":
+        rows.append([
+            {"text": "⬅️ 返回", "callback_data": "defaults:back_menu"},
+            {"text": "✅ 完成", "callback_data": "defaults:done"},
+        ])
+    else:
+        rows.append([
+            {"text": "⬅️ 返回", "callback_data": "draft:edit_conditions"},
+            {"text": "❌ 取消", "callback_data": "draft:cancel"},
+        ])
+    return {"inline_keyboard": rows}
+
+
+def start_group_chat_choose(chat_id, user_id, state, scope):
+    token = uuid.uuid4().hex[:12]
+    state["step"] = "group_chat_choose"
+    state["pending_group_id"] = None
+    state["group_bind_token"] = token
+    state["private_chat_id"] = chat_id
+    send_flow_message(chat_id, user_id, ask_group_choose_prompt(), group_choose_keyboard(scope, user_id, token))
+
+
+def current_group_bind_scope(state):
+    if not state:
+        return None
+    if state.get("action") == "defaults":
+        return "defaults"
+    if state.get("action") == "newbatch_v2":
+        return "draft"
+    return None
+
+
+def group_bind_state_is_valid(user_id, token):
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("step") != "group_chat_choose":
+        return False
+    if state.get("group_bind_token") != token:
+        return False
+    return current_group_bind_scope(state) is not None
+
+
+def bind_group_to_state(user_id, chat):
+    state = ADMIN_STATES.get(user_id)
+    scope = current_group_bind_scope(state)
+    if not state or not scope:
+        return False
+    chat_type = (chat or {}).get("type")
+    private_chat_id = state.get("private_chat_id") or user_id
+    if chat_type not in ("group", "supergroup"):
+        send_flow_message(
+            private_chat_id,
+            user_id,
+            "<b>⚠️ 请选择群聊</b>\n\n当前选择的不是普通群或超级群，请重新点击按钮选择目标群。",
+            group_choose_keyboard(scope, user_id, state.get("group_bind_token") or uuid.uuid4().hex[:12]),
+        )
+        return True
+
+    target_id = str(chat.get("id"))
+    title = chat.get("title") or chat.get("username") or target_id
+    remember_chat_info(chat)
+    state["data"]["required_group_id"] = target_id
+    state["pending_group_id"] = None
+    state.pop("group_bind_token", None)
+    note = bot_membership_note(target_id)
+    text = (
+        "<b>✅ 群聊已绑定</b>\n\n"
+        "群聊：<b>{0}</b>\n"
+        "检测 ID：<code>{1}</code>\n\n"
+        "{2}\n\n"
+        "<i>接下来可继续设置“🔢 发言数量”。</i>"
+    ).format(html.escape(title), html.escape(target_id), note)
+
+    if scope == "defaults":
+        save_default_conditions(state["data"])
+        state["step"] = "menu"
+        send_flow_message(private_chat_id, user_id, text, defaults_keyboard())
+    else:
+        state["step"] = "conditions"
+        send_flow_message(private_chat_id, user_id, text, condition_edit_keyboard())
+    return True
+
+
+def build_group_bind_inline_results(query):
+    user_id, token = parse_group_bind_query(query)
+    if not user_id or not token or not group_bind_state_is_valid(user_id, token):
+        return [
+            {
+                "type": "article",
+                "id": "group_bind_expired",
+                "title": "绑定请求已过期",
+                "description": "请回到 Bot 私聊，重新点击绑定群聊。",
+                "input_message_content": {
+                    "message_text": "绑定请求已过期，请回到 Bot 私聊重新点击绑定群聊。"
+                },
+            }
+        ]
+    return [
+        {
+            "type": "article",
+            "id": "group_bind_{0}".format(token),
+            "title": "绑定这个群聊",
+            "description": "发送后 Bot 会自动检测并回到私聊面板。",
+            "input_message_content": {
+                "message_text": group_bind_command_text(query)
+            },
+        }
+    ]
+
+
+def handle_inline_query(inline_query):
+    query = (inline_query.get("query") or "").strip()
+    user = inline_query.get("from") or {}
+    user_id = user.get("id")
+    if not query.startswith(GROUP_BIND_QUERY_PREFIX + ":"):
+        return
+    if not is_admin(user_id):
+        answer_inline_query(inline_query.get("id"), [], cache_time=0, is_personal=True)
+        return
+    answer_inline_query(
+        inline_query.get("id"),
+        build_group_bind_inline_results(query),
+        cache_time=0,
+        is_personal=True,
+    )
+
+
+def handle_chosen_inline_result(chosen_inline_result):
+    query = (chosen_inline_result.get("query") or "").strip()
+    if not query.startswith(GROUP_BIND_QUERY_PREFIX + ":"):
+        return
+    user = chosen_inline_result.get("from") or {}
+    user_id = user.get("id")
+    if not is_admin(user_id):
+        return
+    expected_user_id, token = parse_group_bind_query(query)
+    if expected_user_id != user_id:
+        return
+    if not group_bind_state_is_valid(user_id, token):
+        return
+
+    chosen_chat = chosen_inline_result.get("chosen_chat")
+    if chosen_chat and chosen_chat.get("id"):
+        bind_group_to_state(user_id, chosen_chat)
+        return
+
+    state = ADMIN_STATES.get(user_id)
+    scope = current_group_bind_scope(state)
+    if state and scope:
+        send_flow_message(
+            state.get("private_chat_id") or user_id,
+            user_id,
+            "<b>⏳ 正在等待群聊回传</b>\n\n"
+            "如果这里没有自动完成，请确认：\n"
+            "• Bot 已加入目标群\n"
+            "• BotFather 的 Privacy Mode 已关闭\n"
+            "• 你已经在目标群发送了“绑定这个群聊”结果",
+            group_choose_keyboard(scope, user_id, token),
+        )
+
+
+def handle_group_bind_message(message):
+    query = parse_group_bind_command(message.get("text") or "")
+    if not query:
+        return False
+    chat = message.get("chat") or {}
+    user = message.get("from") or {}
+    user_id = user.get("id")
+    deleted = delete_message_now(chat.get("id"), message.get("message_id"))
+    expected_user_id, token = parse_group_bind_query(query)
+    if not expected_user_id or expected_user_id != user_id:
+        return True
+    if not is_admin(user_id):
+        return True
+    if not group_bind_state_is_valid(user_id, token):
+        send_message(user_id, "<b>⚠️ 群聊绑定请求已过期。</b>\n\n请回到 Bot 私聊重新点击“绑定群聊”。", admin_keyboard())
+        return True
+    bind_group_to_state(user_id, chat)
+    if not deleted:
+        send_message(
+            user_id,
+            "<b>⚠️ 临时绑定消息未能删除</b>\n\n"
+            "群聊已绑定成功，但 Bot 没有及时删除群里的绑定消息。"
+            "请把 Bot 设为该群管理员，并开启删除消息权限。",
+            admin_keyboard(),
+        )
+    return True
+
+
+def handle_defaults_state(chat_id, user_id, text):
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "defaults":
+        return False
+
+    if is_main_menu_command(text) and text != "/defaults":
+        ADMIN_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
+        return False
+
+    if state["step"] == "menu":
+        send_flow_message(chat_id, user_id, "请点击面板里的按钮修改默认条件，或点击完成退出。", defaults_keyboard())
+        return True
+
+    if state["step"] == "group_chat_choose":
+        token = state.get("group_bind_token") or uuid.uuid4().hex[:12]
+        state["group_bind_token"] = token
+        state["private_chat_id"] = chat_id
+        send_flow_message(chat_id, user_id, ask_group_choose_prompt(), group_choose_keyboard("defaults", user_id, token))
+        return True
+
+    if state["step"] == "edit":
+        field = state.get("pending_field")
+        if field == "required_channel_id" and text.strip() != "0":
+            send_flow_message(chat_id, user_id, ask_condition_value(chat_id, field), defaults_input_keyboard())
+            return True
+        try:
+            apply_condition_input(state, field, text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            return True
+        save_default_conditions(state["data"])
+        state["step"] = "menu"
+        state["pending_field"] = None
+        show_defaults_screen(chat_id, user_id)
+        return True
+
+    if state["step"] == "group_condition_id":
+        try:
+            group_id = validate_group_chat_id(text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            return True
+        if not group_id:
+            state["data"]["required_group_id"] = None
+            state["data"]["required_group_messages"] = 0
+        else:
+            state["data"]["required_group_id"] = group_id
+        save_default_conditions(state["data"])
+        state["step"] = "menu"
+        state["pending_group_id"] = None
+        show_defaults_screen(chat_id, user_id)
+        return True
+
+    if state["step"] == "group_condition_messages":
+        try:
+            group_messages = parse_nonnegative_int(text, "群发言数")
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            return True
+        if group_messages <= 0:
+            send_flow_message(chat_id, user_id, "群发言数必须大于 0。", defaults_input_keyboard())
+            return True
+        state["data"]["required_group_messages"] = group_messages
+        normalize_condition_data(state["data"])
+        save_default_conditions(state["data"])
+        state["step"] = "menu"
+        show_defaults_screen(chat_id, user_id)
+        return True
+
+    return False
+
+
+def handle_defaults_callback(callback_query):
+    user = callback_query.get("from") or {}
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    user_id = user.get("id")
+    data = (callback_query.get("data") or "").split(":", 1)[1]
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "defaults":
+        answer_callback_query(callback_query.get("id"), "请先打开默认条件面板。", show_alert=True)
+        return
+
+    answer_callback_query(callback_query.get("id"))
+    if data in ("group_condition", "group_chat"):
+        start_group_chat_choose(chat_id, user_id, state, "defaults")
+    elif data == "manual_group_id":
+        state["step"] = "group_condition_id"
+        state["pending_group_id"] = None
+        send_flow_message(chat_id, user_id, ask_group_chat_prompt(), defaults_input_keyboard("defaults:back_menu"))
+    elif data == "back_menu":
+        state["step"] = "menu"
+        state["pending_field"] = None
+        state["pending_group_id"] = None
+        show_defaults_screen(chat_id, user_id, message_id)
+    elif data == "group_messages":
+        start_group_messages_input(chat_id, user_id, state, defaults_mode=True)
+    elif data == "channel_id":
+        state["step"] = "edit"
+        state["pending_field"] = "required_channel_id"
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_channel_id"), defaults_input_keyboard("defaults:back_menu"))
+    elif data == "clear":
+        state["data"]["required_group_id"] = None
+        state["data"]["required_group_messages"] = 0
+        state["data"]["required_channel_id"] = None
+        state["data"]["required_channel_link"] = None
+        save_default_conditions(state["data"])
+        show_defaults_screen(chat_id, user_id, message_id)
+    elif data == "done":
+        return_state = state.get("return_state")
+        if return_state:
+            ADMIN_STATES[user_id] = return_state
+            clear_flow_message(chat_id, user_id)
+            send_message(chat_id, "<b>✅ 默认条件已保存，已返回批次草稿。</b>", admin_keyboard())
+            if return_state.get("step") == "conditions":
+                show_batch_condition_screen(chat_id, user_id)
+            elif return_state.get("step") == "confirm":
+                show_batch_preview(chat_id, user_id)
+        else:
+            ADMIN_STATES.pop(user_id, None)
+            clear_flow_message(chat_id, user_id)
+            send_message(chat_id, "<b>✅ 默认条件已保存。</b>", admin_keyboard())
+
+
+def handle_draft_callback(callback_query):
+    user = callback_query.get("from") or {}
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    user_id = user.get("id")
+    data = (callback_query.get("data") or "").split(":", 1)[1]
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "newbatch_v2":
+        answer_callback_query(callback_query.get("id"), "请先重新开始创建批次。", show_alert=True)
+        return
+
+    answer_callback_query(callback_query.get("id"))
+    if data == "cancel":
+        cancel_new_batch(chat_id, user_id)
+    elif data == "type_usage":
+        state["data"]["batch_type"] = "usage"
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "type_unique":
+        state["data"]["batch_type"] = "unique"
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data in ("group_condition", "group_chat"):
+        start_group_chat_choose(chat_id, user_id, state, "draft")
+    elif data == "manual_group_id":
+        state["step"] = "group_condition_id"
+        state["pending_group_id"] = None
+        send_flow_message(chat_id, user_id, ask_group_chat_prompt(), draft_input_keyboard("draft:edit_conditions"))
+    elif data == "group_messages":
+        start_group_messages_input(chat_id, user_id, state, defaults_mode=False)
+    elif data == "channel_id":
+        state["step"] = "condition_input"
+        state["pending_field"] = "required_channel_id"
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_channel_id"), draft_input_keyboard("draft:edit_conditions"))
+    elif data == "load_defaults":
+        with db_connect() as conn:
+            state["data"].update(load_default_conditions(conn))
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "clear_conditions":
+        state["data"]["required_group_id"] = None
+        state["data"]["required_group_messages"] = 0
+        state["data"]["required_channel_id"] = None
+        state["data"]["required_channel_link"] = None
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "continue":
+        if state["data"]["batch_type"] == "usage":
+            state["step"] = "usage_limit"
+            send_usage_limit_prompt(chat_id, user_id)
+        else:
+            state["step"] = "codes"
+            send_unique_codes_prompt(chat_id, user_id)
+    elif data == "back_type" or data == "edit_type":
+        state["step"] = "type"
+        send_batch_type_prompt(chat_id, user_id)
+    elif data == "open_defaults":
+        begin_defaults_screen(chat_id, user_id, state)
+    elif data == "edit_conditions":
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "edit_codes":
+        if state["data"]["batch_type"] == "usage":
+            state["step"] = "usage_limit"
+            send_usage_limit_prompt(chat_id, user_id)
+        else:
+            state["step"] = "codes"
+            send_unique_codes_prompt(chat_id, user_id)
+    elif data == "back_usage_limit":
+        state["step"] = "usage_limit"
+        send_usage_limit_prompt(chat_id, user_id)
+    elif data == "confirm":
+        create_batch_from_draft(chat_id, user_id)
+
+
 def handle_chatid(chat_id, message):
     chat = message.get("chat") or {}
     title = chat.get("title") or chat.get("username") or "当前会话"
@@ -3563,10 +4092,13 @@ def process_message(message):
     if not chat_id or not user_id:
         return
 
-    record_group_message(message)
-
     if not is_private_chat(chat):
+        if handle_group_bind_message(message):
+            return
+        record_group_message(message)
         return
+
+    record_group_message(message)
 
     if handle_forwarded_chat(chat_id, user_id, message):
         delete_message(chat_id, message.get("message_id"))
@@ -3660,6 +4192,12 @@ def get_update_user_id(update):
     if "callback_query" in update:
         user = (update.get("callback_query") or {}).get("from") or {}
         return user.get("id")
+    if "inline_query" in update:
+        user = (update.get("inline_query") or {}).get("from") or {}
+        return user.get("id")
+    if "chosen_inline_result" in update:
+        user = (update.get("chosen_inline_result") or {}).get("from") or {}
+        return user.get("id")
     return None
 
 
@@ -3678,6 +4216,10 @@ def process_update(update):
         process_message(update["message"])
     elif "callback_query" in update:
         handle_callback(update["callback_query"])
+    elif "inline_query" in update:
+        handle_inline_query(update["inline_query"])
+    elif "chosen_inline_result" in update:
+        handle_chosen_inline_result(update["chosen_inline_result"])
 
 
 def run_update(update):
@@ -3708,7 +4250,12 @@ def poll_loop():
     try:
         while True:
             try:
-                params = {"timeout": POLL_TIMEOUT}
+                params = {
+                    "timeout": POLL_TIMEOUT,
+                    "allowed_updates": json.dumps(
+                        ["message", "callback_query", "inline_query", "chosen_inline_result"]
+                    ),
+                }
                 if offset is not None:
                     params["offset"] = offset
                 updates = api_call("getUpdates", params, timeout=POLL_TIMEOUT + 10)

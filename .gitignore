@@ -4,4 +4,5 @@ __pycache__/
 data/*.sqlite3
 data/*.sqlite3-*
 logs/*.log
-
+重要资料.txt
+.codex-secrets/
