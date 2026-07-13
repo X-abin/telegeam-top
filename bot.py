@@ -14,6 +14,7 @@ import sqlite3
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -64,6 +65,10 @@ ADMIN_IDS = parse_admin_ids(os.environ.get("ADMIN_IDS", ""))
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "").strip().lstrip("@")
 DATABASE_PATH = abs_path(os.environ.get("DATABASE_PATH", "data/bot.sqlite3"))
 LOG_FILE = abs_path(os.environ.get("LOG_FILE", "logs/bot.log"))
+API_TIMEOUT = int(os.environ.get("API_TIMEOUT", "20") or 20)
+POLL_TIMEOUT = int(os.environ.get("POLL_TIMEOUT", "20") or 20)
+UPDATE_WORKERS = int(os.environ.get("UPDATE_WORKERS", "16") or 16)
+MAX_INFLIGHT_UPDATES = int(os.environ.get("MAX_INFLIGHT_UPDATES", str(UPDATE_WORKERS * 4)) or (UPDATE_WORKERS * 4))
 API_BASE = "https://api.telegram.org/bot{0}/".format(BOT_TOKEN)
 
 ADMIN_STATES = {}
@@ -71,6 +76,10 @@ VERIFY_STATES = {}
 CLEANUP_MESSAGES = {}
 DELETE_QUEUE = Queue()
 DELETE_WORKER_STARTED = False
+USER_LOCKS = {}
+USER_LOCKS_GUARD = threading.Lock()
+INFLIGHT_SEMAPHORE = threading.BoundedSemaphore(MAX_INFLIGHT_UPDATES)
+UPDATE_EXECUTOR = None
 CAPTCHA_TTL_SECONDS = 120
 
 
@@ -216,7 +225,7 @@ def api_call(method, data=None):
         data = {}
     body = urlencode(data).encode("utf-8")
     request = Request(API_BASE + method, data=body)
-    with urlopen(request, timeout=60) as response:
+    with urlopen(request, timeout=API_TIMEOUT) as response:
         payload = response.read().decode("utf-8")
     result = json.loads(payload)
     if not result.get("ok"):
@@ -1556,6 +1565,142 @@ def issue_code(chat_id, user, batch_token):
         conn.close()
 
 
+def issue_code_v2(chat_id, user, batch_token):
+    response_text = None
+
+    with db_connect() as conn:
+        upsert_user(conn, user)
+
+    with db_connect() as conn:
+        batch = find_batch(conn, batch_token)
+        if not batch:
+            response_text = "<b>领取失败</b>\n\n领取链接不存在或已失效。"
+        elif batch["status"] != "active":
+            log_claim(conn, user, batch, None, "failed", 1, "batch_disabled")
+            response_text = "<b>领取失败</b>\n\n当前活动未开始、已结束或已失效。"
+        else:
+            previous = conn.execute(
+                """
+                SELECT code
+                FROM claim_logs
+                WHERE batch_id = ? AND telegram_id = ? AND status = 'success'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (batch["id"], user["id"]),
+            ).fetchone()
+            if previous:
+                response_text = "<b>你已经领取过这个批次</b>\n\n兑换码：\n<code>{0}</code>".format(
+                    html.escape(previous["code"] or "")
+                )
+            else:
+                conditions_ok, reason, message = check_claim_conditions(conn, user, batch)
+                if not conditions_ok:
+                    log_claim(conn, user, batch, None, "failed", 1, reason)
+                    response_text = message
+
+    if response_text:
+        send_message(chat_id, response_text)
+        return
+
+    conn = db_connect()
+    transaction_started = False
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        transaction_started = True
+        upsert_user(conn, user)
+        batch = find_batch(conn, batch_token)
+        if not batch:
+            conn.execute("COMMIT")
+            transaction_started = False
+            response_text = "<b>领取失败</b>\n\n领取链接不存在或已失效。"
+        elif batch["status"] != "active":
+            log_claim(conn, user, batch, None, "failed", 1, "batch_disabled")
+            conn.execute("COMMIT")
+            transaction_started = False
+            response_text = "<b>领取失败</b>\n\n当前活动未开始、已结束或已失效。"
+        else:
+            previous = conn.execute(
+                """
+                SELECT code
+                FROM claim_logs
+                WHERE batch_id = ? AND telegram_id = ? AND status = 'success'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (batch["id"], user["id"]),
+            ).fetchone()
+            if previous:
+                conn.execute("COMMIT")
+                transaction_started = False
+                response_text = "<b>你已经领取过这个批次</b>\n\n兑换码：\n<code>{0}</code>".format(
+                    html.escape(previous["code"] or "")
+                )
+            elif batch["batch_type"] == "usage":
+                if batch["usage_count"] >= batch["usage_limit"]:
+                    log_claim(conn, user, batch, None, "failed", 1, "usage_limit_reached")
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = "<b>领取失败</b>\n\n当前兑换码已达到使用次数上限。"
+                else:
+                    conn.execute(
+                        "UPDATE batches SET usage_count = usage_count + 1 WHERE id = ?",
+                        (batch["id"],),
+                    )
+                    code = batch["shared_code"]
+                    log_claim(conn, user, batch, code, "success", 1, None)
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = (
+                        "<b>✅ 领取成功</b>\n\n"
+                        "你的兑换码：\n<code>{0}</code>\n\n"
+                        "<i>领取记录已保存。</i>"
+                    ).format(html.escape(code or ""))
+            else:
+                code_row = conn.execute(
+                    """
+                    SELECT id, code
+                    FROM batch_codes
+                    WHERE batch_id = ? AND status = 'available'
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (batch["id"],),
+                ).fetchone()
+                if not code_row:
+                    log_claim(conn, user, batch, None, "failed", 1, "sold_out")
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = "<b>领取失败</b>\n\n当前兑换码已领完。"
+                else:
+                    conn.execute(
+                        """
+                        UPDATE batch_codes
+                        SET status = 'claimed', claimed_by = ?, claimed_at = ?
+                        WHERE id = ? AND status = 'available'
+                        """,
+                        (user["id"], now_text(), code_row["id"]),
+                    )
+                    log_claim(conn, user, batch, code_row["code"], "success", 1, None)
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = (
+                        "<b>✅ 领取成功</b>\n\n"
+                        "你的兑换码：\n<code>{0}</code>\n\n"
+                        "<i>领取记录已保存。</i>"
+                    ).format(html.escape(code_row["code"] or ""))
+    except Exception:
+        if transaction_started:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    if response_text:
+        send_message(chat_id, response_text)
+
+
 def handle_callback(callback_query):
     callback_id = callback_query.get("id")
     user = callback_query.get("from") or {}
@@ -1607,7 +1752,7 @@ def handle_callback(callback_query):
     VERIFY_STATES.pop(user_id, None)
     clear_flow_message(chat_id, user_id)
     answer_callback_query(callback_id, "验证通过")
-    issue_code(chat_id, user, state["batch_token"])
+    issue_code_v2(chat_id, user, state["batch_token"])
 
 
 def handle_start(chat_id, user, text):
@@ -2303,26 +2448,76 @@ def process_message(message):
             send_message(chat_id, "请通过管理员分享的专属领取链接进入。")
 
 
+def get_update_user_id(update):
+    if "message" in update:
+        user = (update.get("message") or {}).get("from") or {}
+        return user.get("id")
+    if "callback_query" in update:
+        user = (update.get("callback_query") or {}).get("from") or {}
+        return user.get("id")
+    return None
+
+
+def get_user_lock(user_id):
+    key = user_id if user_id is not None else "anonymous"
+    with USER_LOCKS_GUARD:
+        lock = USER_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            USER_LOCKS[key] = lock
+        return lock
+
+
+def process_update(update):
+    if "message" in update:
+        process_message(update["message"])
+    elif "callback_query" in update:
+        handle_callback(update["callback_query"])
+
+
+def run_update(update):
+    user_id = get_update_user_id(update)
+    with get_user_lock(user_id):
+        process_update(update)
+
+
+def update_done(future):
+    try:
+        exc = future.exception()
+        if exc:
+            logging.error("Update worker error: %s", exc, exc_info=(type(exc), exc, exc.__traceback__))
+    finally:
+        INFLIGHT_SEMAPHORE.release()
+
+
+def submit_update(update):
+    INFLIGHT_SEMAPHORE.acquire()
+    future = UPDATE_EXECUTOR.submit(run_update, update)
+    future.add_done_callback(update_done)
+
+
 def poll_loop():
+    global UPDATE_EXECUTOR
     offset = None
-    while True:
-        try:
-            params = {"timeout": 50}
-            if offset is not None:
-                params["offset"] = offset
-            updates = api_call("getUpdates", params)
-            for update in updates:
-                offset = update["update_id"] + 1
-                if "message" in update:
-                    process_message(update["message"])
-                elif "callback_query" in update:
-                    handle_callback(update["callback_query"])
-        except (HTTPError, URLError, RuntimeError, sqlite3.Error) as exc:
-            logging.exception("Polling error: %s", exc)
-            time.sleep(2)
-        except KeyboardInterrupt:
-            logging.info("Bot stopped")
-            break
+    UPDATE_EXECUTOR = ThreadPoolExecutor(max_workers=UPDATE_WORKERS)
+    try:
+        while True:
+            try:
+                params = {"timeout": POLL_TIMEOUT}
+                if offset is not None:
+                    params["offset"] = offset
+                updates = api_call("getUpdates", params)
+                for update in updates:
+                    offset = update["update_id"] + 1
+                    submit_update(update)
+            except (HTTPError, URLError, RuntimeError, sqlite3.Error) as exc:
+                logging.exception("Polling error: %s", exc)
+                time.sleep(2)
+            except KeyboardInterrupt:
+                logging.info("Bot stopped")
+                break
+    finally:
+        UPDATE_EXECUTOR.shutdown(wait=True)
 
 
 def main():
@@ -2333,7 +2528,13 @@ def main():
     init_db()
     start_delete_worker()
     configure_bot_menu()
-    logging.info("Bot started")
+    logging.info(
+        "Bot started workers=%s max_inflight=%s api_timeout=%s poll_timeout=%s",
+        UPDATE_WORKERS,
+        MAX_INFLIGHT_UPDATES,
+        API_TIMEOUT,
+        POLL_TIMEOUT,
+    )
     poll_loop()
 
 
