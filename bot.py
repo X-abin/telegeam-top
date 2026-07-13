@@ -2769,8 +2769,7 @@ def admin_keyboard():
     return {
         "keyboard": [
             [{"text": "📦 创建批次"}, {"text": "📋 批次列表"}, {"text": "🗒 最近记录"}],
-            [{"text": "⚙️ 默认条件"}, {"text": "📊 已记录群"}],
-            [{"text": "👤 我的ID"}],
+            [{"text": "⚙️ 默认条件"}, {"text": "📊 已记录群"}, {"text": "👤 我的ID"}],
         ],
         "resize_keyboard": True,
         "is_persistent": True,
