@@ -2766,7 +2766,7 @@ def admin_keyboard():
     return {
         "keyboard": [
             [{"text": "📦 创建批次"}, {"text": "📋 批次列表"}, {"text": "🗒 最近记录"}],
-            [{"text": "⚙️ 默认条件"}, {"text": "🧩 核心流程"}, {"text": "📊 已记录群"}],
+            [{"text": "⚙️ 默认条件"}, {"text": "📊 已记录群"}],
             [{"text": "👤 我的ID"}],
         ],
         "resize_keyboard": True,
@@ -2817,14 +2817,13 @@ def normalize_main_menu_text(text):
         "📋 批次列表": "/batches",
         "🗒 最近记录": "/records",
         "⚙️ 默认条件": "/defaults",
-        "🧩 核心流程": "/flow",
         "📊 已记录群": "/groups",
         "👤 我的ID": "/whoami",
     }.get(text, text)
 
 
 def is_main_menu_command(text):
-    return text in ("/newbatch", "/batches", "/records", "/defaults", "/flow", "/groups", "/whoami")
+    return text in ("/newbatch", "/batches", "/records", "/defaults", "/groups", "/whoami")
 
 
 def bot_membership_note(target_id):
@@ -4335,7 +4334,6 @@ def process_message(message):
         "📋 批次列表": "/batches",
         "🗒 最近记录": "/records",
         "⚙️ 默认条件": "/defaults",
-        "🧩 核心流程": "/flow",
         "📊 已记录群": "/groups",
         "🛡 接收状态": "/botstatus",
         "👤 我的ID": "/whoami",
@@ -4394,8 +4392,6 @@ def process_message(message):
         show_batch_detail(chat_id, user_id, text)
     elif text.startswith("/records") or text in ("最近领取记录", "🗒 最近记录"):
         show_records(chat_id, user_id)
-    elif text.startswith("/flow") or text in ("核心流程", "🧭 核心流程"):
-        show_flow_v2(chat_id, user_id)
     else:
         if is_admin(user_id):
             send_message(chat_id, ui_notice("管理员面板", "请选择下方功能继续。"), admin_keyboard())
@@ -5282,7 +5278,6 @@ def configure_bot_menu():
         {"command": "batches", "description": "查看批次列表"},
         {"command": "batch", "description": "查看批次详情"},
         {"command": "records", "description": "查看最近领取记录"},
-        {"command": "flow", "description": "查看核心流程"},
         {"command": "groups", "description": "查看已记录群 ID"},
         {"command": "chatid", "description": "查看当前会话 ID"},
     ]
