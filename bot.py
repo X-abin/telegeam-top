@@ -4060,15 +4060,8 @@ def show_defaults_screen(chat_id, user_id, message_id=None):
 
 
 def send_admin_keyboard_keepalive(chat_id, delay_seconds=2.0):
-    try:
-        result = send_message(chat_id, "⌨️", admin_keyboard())
-        message_id = result.get("message_id") if isinstance(result, dict) else None
-        if message_id:
-            timer = threading.Timer(delay_seconds, delete_message, args=(chat_id, message_id))
-            timer.daemon = True
-            timer.start()
-    except Exception as exc:
-        logging.debug("admin keyboard keepalive ignored chat=%s error=%s", chat_id, exc)
+    # ReplyKeyboard is already persistent; do not send a placeholder message.
+    return None
 
 
 def ensure_defaults_state(user_id, return_state=None):
@@ -4096,8 +4089,6 @@ def begin_defaults_screen(chat_id, user_id, return_state=None):
     state["pending_field"] = None
     state["pending_group_id"] = None
     show_defaults_screen(chat_id, user_id)
-    if not return_state:
-        send_admin_keyboard_keepalive(chat_id)
 
 
 def handle_defaults_state(chat_id, user_id, text):
