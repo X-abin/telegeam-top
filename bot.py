@@ -68,20 +68,32 @@ DATABASE_PATH = abs_path(os.environ.get("DATABASE_PATH", "data/bot.sqlite3"))
 LOG_FILE = abs_path(os.environ.get("LOG_FILE", "logs/bot.log"))
 API_TIMEOUT = int(os.environ.get("API_TIMEOUT", "20") or 20)
 POLL_TIMEOUT = int(os.environ.get("POLL_TIMEOUT", "20") or 20)
-UPDATE_WORKERS = int(os.environ.get("UPDATE_WORKERS", "16") or 16)
-MAX_INFLIGHT_UPDATES = int(os.environ.get("MAX_INFLIGHT_UPDATES", str(UPDATE_WORKERS * 4)) or (UPDATE_WORKERS * 4))
+UPDATE_WORKERS = int(os.environ.get("UPDATE_WORKERS", "64") or 64)
+MAX_INFLIGHT_UPDATES = int(os.environ.get("MAX_INFLIGHT_UPDATES", str(UPDATE_WORKERS * 8)) or (UPDATE_WORKERS * 8))
+API_SEND_WORKERS = int(os.environ.get("API_SEND_WORKERS", "64") or 64)
+API_FAST_WORKERS = int(os.environ.get("API_FAST_WORKERS", "16") or 16)
+DELETE_WORKERS = int(os.environ.get("DELETE_WORKERS", "8") or 8)
+API_MAX_RETRIES = int(os.environ.get("API_MAX_RETRIES", "3") or 3)
+API_RETRY_MAX_SLEEP = float(os.environ.get("API_RETRY_MAX_SLEEP", "8") or 8)
+MEMBER_CACHE_TTL_SECONDS = int(os.environ.get("MEMBER_CACHE_TTL_SECONDS", "60") or 60)
 API_BASE = "https://api.telegram.org/bot{0}/".format(BOT_TOKEN)
 
 ADMIN_STATES = {}
 VERIFY_STATES = {}
 CLEANUP_MESSAGES = {}
+FLOW_MESSAGE_GENERATIONS = {}
+FLOW_MESSAGE_LOCK = threading.Lock()
 DELETE_QUEUE = Queue()
 DELETE_WORKER_STARTED = False
 USER_LOCKS = {}
 USER_LOCKS_GUARD = threading.Lock()
 INFLIGHT_SEMAPHORE = threading.BoundedSemaphore(MAX_INFLIGHT_UPDATES)
 UPDATE_EXECUTOR = None
+API_SEND_EXECUTOR = None
+API_FAST_EXECUTOR = None
 CAPTCHA_TTL_SECONDS = 120
+CHAT_MEMBER_CACHE = {}
+CHAT_MEMBER_CACHE_LOCK = threading.Lock()
 
 
 def ensure_dirs():
@@ -110,7 +122,7 @@ def now_text():
 def db_connect():
     conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
@@ -122,6 +134,8 @@ def ensure_column(conn, table, column, ddl):
 
 def init_db():
     with db_connect() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -224,15 +238,48 @@ def init_db():
 def api_call(method, data=None, timeout=None):
     if data is None:
         data = {}
-    body = urlencode(data).encode("utf-8")
-    request = Request(API_BASE + method, data=body)
     request_timeout = timeout if timeout is not None else API_TIMEOUT
-    with urlopen(request, timeout=request_timeout) as response:
-        payload = response.read().decode("utf-8")
-    result = json.loads(payload)
-    if not result.get("ok"):
-        raise RuntimeError("Telegram API error: {0}".format(result))
-    return result["result"]
+    last_error = None
+    for attempt in range(API_MAX_RETRIES + 1):
+        body = urlencode(data).encode("utf-8")
+        request = Request(API_BASE + method, data=body)
+        try:
+            with urlopen(request, timeout=request_timeout) as response:
+                payload = response.read().decode("utf-8")
+            result = json.loads(payload)
+            if not result.get("ok"):
+                parameters = result.get("parameters") or {}
+                retry_after = parameters.get("retry_after")
+                if retry_after and attempt < API_MAX_RETRIES:
+                    time.sleep(min(float(retry_after), API_RETRY_MAX_SLEEP))
+                    continue
+                raise RuntimeError("Telegram API error: {0}".format(result))
+            return result["result"]
+        except HTTPError as exc:
+            last_error = exc
+            retry_after = None
+            try:
+                payload = exc.read().decode("utf-8")
+                error_result = json.loads(payload)
+                retry_after = (error_result.get("parameters") or {}).get("retry_after")
+            except Exception:
+                error_result = None
+            if exc.code == 429 and attempt < API_MAX_RETRIES:
+                time.sleep(min(float(retry_after or 1), API_RETRY_MAX_SLEEP))
+                continue
+            if exc.code >= 500 and attempt < API_MAX_RETRIES:
+                time.sleep(min(0.5 * (attempt + 1), API_RETRY_MAX_SLEEP))
+                continue
+            if error_result:
+                raise RuntimeError("Telegram API HTTP error: {0}".format(error_result))
+            raise
+        except (URLError, socket.timeout, TimeoutError) as exc:
+            last_error = exc
+            if attempt < API_MAX_RETRIES:
+                time.sleep(min(0.5 * (attempt + 1), API_RETRY_MAX_SLEEP))
+                continue
+            raise
+    raise RuntimeError("Telegram API failed after retries: {0}".format(last_error))
 
 
 def send_message(chat_id, text, reply_markup=None):
@@ -274,9 +321,10 @@ def start_delete_worker():
     if DELETE_WORKER_STARTED:
         return
     DELETE_WORKER_STARTED = True
-    worker = threading.Thread(target=delete_worker, name="delete-message-worker")
-    worker.daemon = True
-    worker.start()
+    for index in range(DELETE_WORKERS):
+        worker = threading.Thread(target=delete_worker, name="delete-message-worker-{0}".format(index + 1))
+        worker.daemon = True
+        worker.start()
 
 
 def delete_message(chat_id, message_id):
@@ -294,19 +342,76 @@ def cleanup_key(chat_id, user_id=None):
     return "{0}:{1}".format(chat_id, user_id or chat_id)
 
 
+def bump_flow_generation(key):
+    with FLOW_MESSAGE_LOCK:
+        generation = FLOW_MESSAGE_GENERATIONS.get(key, 0) + 1
+        FLOW_MESSAGE_GENERATIONS[key] = generation
+        return generation
+
+
+def current_flow_generation(key):
+    with FLOW_MESSAGE_LOCK:
+        return FLOW_MESSAGE_GENERATIONS.get(key, 0)
+
+
+def pop_cleanup_message(key):
+    with FLOW_MESSAGE_LOCK:
+        return CLEANUP_MESSAGES.pop(key, None)
+
+
+def remember_cleanup_message(key, generation, chat_id, message_id):
+    stale = False
+    with FLOW_MESSAGE_LOCK:
+        if FLOW_MESSAGE_GENERATIONS.get(key) == generation:
+            CLEANUP_MESSAGES[key] = message_id
+        else:
+            stale = True
+    if stale:
+        delete_message(chat_id, message_id)
+
+
 def send_flow_message(chat_id, user_id, text, reply_markup=None, replace_previous=True):
     key = cleanup_key(chat_id, user_id)
+    generation = bump_flow_generation(key)
     if replace_previous:
-        delete_message(chat_id, CLEANUP_MESSAGES.pop(key, None))
+        delete_message(chat_id, pop_cleanup_message(key))
     result = send_message(chat_id, text, reply_markup)
     message_id = result.get("message_id") if isinstance(result, dict) else None
     if message_id:
-        CLEANUP_MESSAGES[key] = message_id
+        remember_cleanup_message(key, generation, chat_id, message_id)
     return result
 
 
+def send_flow_message_async(chat_id, user_id, text, reply_markup=None, replace_previous=True):
+    key = cleanup_key(chat_id, user_id)
+    generation = bump_flow_generation(key)
+    if replace_previous:
+        delete_message(chat_id, pop_cleanup_message(key))
+    future = send_message_async(chat_id, text, reply_markup)
+
+    def remember_future_message(done_future):
+        try:
+            result = done_future.result()
+            message_id = result.get("message_id") if isinstance(result, dict) else None
+            if message_id:
+                remember_cleanup_message(key, generation, chat_id, message_id)
+        except Exception as exc:
+            logging.warning("async flow message failed chat=%s user=%s error=%s", chat_id, user_id, exc)
+
+    if hasattr(future, "add_done_callback"):
+        future.add_done_callback(remember_future_message)
+    else:
+        result = future
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        if message_id:
+            remember_cleanup_message(key, generation, chat_id, message_id)
+    return future
+
+
 def clear_flow_message(chat_id, user_id):
-    delete_message(chat_id, CLEANUP_MESSAGES.pop(cleanup_key(chat_id, user_id), None))
+    key = cleanup_key(chat_id, user_id)
+    bump_flow_generation(key)
+    delete_message(chat_id, pop_cleanup_message(key))
 
 
 def answer_callback_query(callback_query_id, text=None, show_alert=False):
@@ -316,6 +421,31 @@ def answer_callback_query(callback_query_id, text=None, show_alert=False):
     if show_alert:
         data["show_alert"] = "true"
     return api_call("answerCallbackQuery", data)
+
+
+def log_async_api_error(future):
+    try:
+        exc = future.exception()
+        if exc:
+            logging.warning("Async Telegram API call failed: %s", exc)
+    except Exception as exc:
+        logging.warning("Async Telegram API callback failed: %s", exc)
+
+
+def submit_async_api(executor, fn, *args, **kwargs):
+    if executor is None:
+        return fn(*args, **kwargs)
+    future = executor.submit(fn, *args, **kwargs)
+    future.add_done_callback(log_async_api_error)
+    return future
+
+
+def send_message_async(chat_id, text, reply_markup=None):
+    return submit_async_api(API_SEND_EXECUTOR, send_message, chat_id, text, reply_markup)
+
+
+def answer_callback_query_async(callback_query_id, text=None, show_alert=False):
+    return submit_async_api(API_FAST_EXECUTOR, answer_callback_query, callback_query_id, text, show_alert)
 
 
 def answer_inline_query(inline_query_id, results, cache_time=0, is_personal=True):
@@ -356,6 +486,24 @@ def get_chat_member(chat_id, user_id):
     except Exception as exc:
         logging.warning("getChatMember failed chat=%s user=%s error=%s", chat_id, user_id, exc)
         return None
+
+
+def get_chat_member_cached(chat_id, user_id):
+    key = "{0}:{1}".format(chat_id, user_id)
+    now = time.time()
+    with CHAT_MEMBER_CACHE_LOCK:
+        cached = CHAT_MEMBER_CACHE.get(key)
+        if cached and cached["expires_at"] > now:
+            return cached["member"]
+
+    member = get_chat_member(chat_id, user_id)
+    if member is not None:
+        with CHAT_MEMBER_CACHE_LOCK:
+            CHAT_MEMBER_CACHE[key] = {
+                "member": member,
+                "expires_at": now + MEMBER_CACHE_TTL_SECONDS,
+            }
+    return member
 
 
 def get_chat(chat_id):
@@ -1083,7 +1231,7 @@ def check_claim_conditions(conn, user, batch):
                 "subscription_target_invalid",
                 "<b>领取失败</b>\n\n当前频道订阅条件需要管理员重新配置：私密邀请链接不能单独作为检测目标。",
             )
-        member = get_chat_member(channel_id, user["id"])
+        member = get_chat_member_cached(channel_id, user["id"])
         if not member_is_joined(member):
             open_text = ""
             channel_link = data_value(batch, "required_channel_link") or default_subscription_link(channel_id)
@@ -1542,7 +1690,7 @@ def begin_claim(chat_id, user, token):
         "answer_key": answer_key,
         "expires_at": time.time() + CAPTCHA_TTL_SECONDS,
     }
-    send_flow_message(
+    send_flow_message_async(
         chat_id,
         user["id"],
         "<b>🎁 准备领取</b>\n\n"
@@ -1694,7 +1842,7 @@ def issue_code_v2(chat_id, user, batch_token):
                     response_text = message
 
     if response_text:
-        send_message(chat_id, response_text)
+        send_message_async(chat_id, response_text)
         return
 
     conn = db_connect()
@@ -1703,7 +1851,6 @@ def issue_code_v2(chat_id, user, batch_token):
         conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         transaction_started = True
-        upsert_user(conn, user)
         batch = find_batch(conn, batch_token)
         if not batch:
             conn.execute("COMMIT")
@@ -1792,7 +1939,7 @@ def issue_code_v2(chat_id, user, batch_token):
         conn.close()
 
     if response_text:
-        send_message(chat_id, response_text)
+        send_message_async(chat_id, response_text)
 
 
 def handle_callback(callback_query):
@@ -1822,18 +1969,18 @@ def handle_callback(callback_query):
         return
     parts = data.split(":")
     if len(parts) != 3:
-        answer_callback_query(callback_id, "验证数据异常，请重新打开领取链接。", show_alert=True)
+        answer_callback_query_async(callback_id, "验证数据异常，请重新打开领取链接。", show_alert=True)
         return
     token = parts[1]
     selected_key = parts[2]
     state = VERIFY_STATES.get(user_id)
     if not state or state.get("token") != token:
-        answer_callback_query(callback_id, "验证已失效，请重新打开领取链接。", show_alert=True)
+        answer_callback_query_async(callback_id, "验证已失效，请重新打开领取链接。", show_alert=True)
         return
     if time.time() > state.get("expires_at", 0):
         VERIFY_STATES.pop(user_id, None)
         clear_flow_message(chat_id, user_id)
-        answer_callback_query(callback_id, "验证已过期，请重新打开领取链接。", show_alert=True)
+        answer_callback_query_async(callback_id, "验证已过期，请重新打开领取链接。", show_alert=True)
         return
     if selected_key != state.get("answer_key"):
         VERIFY_STATES.pop(user_id, None)
@@ -1843,15 +1990,15 @@ def handle_callback(callback_query):
             batch = find_batch(conn, state["batch_token"])
             if batch:
                 log_claim(conn, user, batch, None, "failed", 0, "captcha_failed")
-        answer_callback_query(callback_id, "验证失败，请重新打开领取链接。", show_alert=True)
-        send_message(
+        answer_callback_query_async(callback_id, "验证失败，请重新打开领取链接。", show_alert=True)
+        send_message_async(
             chat_id,
             ui_error("人机验证失败", "本次领取已终止。\n\n<i>请重新打开领取链接后再试。</i>"),
         )
         return
     VERIFY_STATES.pop(user_id, None)
     clear_flow_message(chat_id, user_id)
-    answer_callback_query(callback_id, "验证通过")
+    answer_callback_query_async(callback_id, "验证通过")
     issue_code_v2(chat_id, user, state["batch_token"])
 
 
@@ -5193,7 +5340,7 @@ def check_claim_conditions(conn, user, batch):
                 "subscription_target_invalid",
                 ui_error("领取失败", "当前频道订阅条件需要管理员重新配置。"),
             )
-        member = get_chat_member(channel_id, user["id"])
+        member = get_chat_member_cached(channel_id, user["id"])
         if not member_is_joined(member):
             channel_link = data_value(batch, "required_channel_link") or default_subscription_link(channel_id)
             open_text = "\n" + ui_field("订阅入口", subscription_display_html(batch)) if channel_link else ""
@@ -5240,7 +5387,7 @@ def issue_code_v2(chat_id, user, batch_token):
                     response_text = message
 
     if response_text:
-        send_message(chat_id, response_text)
+        send_message_async(chat_id, response_text)
         return
 
     conn = db_connect()
@@ -5249,7 +5396,6 @@ def issue_code_v2(chat_id, user, batch_token):
         conn.isolation_level = None
         conn.execute("BEGIN IMMEDIATE")
         transaction_started = True
-        upsert_user(conn, user)
         batch = find_batch(conn, batch_token)
         if not batch:
             conn.execute("COMMIT")
@@ -5309,13 +5455,13 @@ def issue_code_v2(chat_id, user, batch_token):
         conn.close()
 
     if response_text:
-        send_message(chat_id, response_text)
+        send_message_async(chat_id, response_text)
 
 
 def handle_start(chat_id, user, text):
     parts = text.split(None, 1)
     if len(parts) < 2:
-        send_message(chat_id, ui_notice("领取入口", "请通过管理员分享的专属领取链接进入。"))
+        send_message_async(chat_id, ui_notice("领取入口", "请通过管理员分享的专属领取链接进入。"))
         return
     token = parts[1].strip()
     with db_connect() as conn:
@@ -5323,18 +5469,18 @@ def handle_start(chat_id, user, text):
         batch = find_batch(conn, token)
         if not batch:
             log_claim(conn, user, None, None, "failed", 0, "link_not_found")
-            send_message(chat_id, ui_error("领取失败", "领取链接不存在或已失效。"))
+            send_message_async(chat_id, ui_error("领取失败", "领取链接不存在或已失效。"))
             return
         if batch["status"] != "active":
             log_claim(conn, user, batch, None, "failed", 0, "batch_disabled")
-            send_message(chat_id, ui_error("领取失败", "当前活动未开始、已结束或已失效。"))
+            send_message_async(chat_id, ui_error("领取失败", "当前活动未开始、已结束或已失效。"))
             return
         previous = conn.execute(
             "SELECT code FROM claim_logs WHERE batch_id = ? AND telegram_id = ? AND status = 'success' ORDER BY id DESC LIMIT 1",
             (batch["id"], user["id"]),
         ).fetchone()
         if previous:
-            send_message(chat_id, ui_success("你已经领取过这个批次", ui_field("兑换码", ui_code(previous["code"] or ""))))
+            send_message_async(chat_id, ui_success("你已经领取过这个批次", ui_field("兑换码", ui_code(previous["code"] or ""))))
             return
 
     verify_token = uuid.uuid4().hex[:16]
@@ -5345,7 +5491,7 @@ def handle_start(chat_id, user, text):
         "answer_key": answer_key,
         "expires_at": time.time() + CAPTCHA_TTL_SECONDS,
     }
-    send_flow_message(
+    send_flow_message_async(
         chat_id,
         user["id"],
         "<b>🎁 准备领取</b>\n\n"
@@ -5503,6 +5649,24 @@ def poll_loop():
         UPDATE_EXECUTOR.shutdown(wait=True)
 
 
+def start_api_executors():
+    global API_SEND_EXECUTOR, API_FAST_EXECUTOR
+    if API_SEND_EXECUTOR is None:
+        API_SEND_EXECUTOR = ThreadPoolExecutor(max_workers=API_SEND_WORKERS)
+    if API_FAST_EXECUTOR is None:
+        API_FAST_EXECUTOR = ThreadPoolExecutor(max_workers=API_FAST_WORKERS)
+
+
+def stop_api_executors():
+    global API_SEND_EXECUTOR, API_FAST_EXECUTOR
+    if API_SEND_EXECUTOR is not None:
+        API_SEND_EXECUTOR.shutdown(wait=True)
+        API_SEND_EXECUTOR = None
+    if API_FAST_EXECUTOR is not None:
+        API_FAST_EXECUTOR.shutdown(wait=True)
+        API_FAST_EXECUTOR = None
+
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is required in .env")
@@ -5510,15 +5674,21 @@ def main():
     setup_logging()
     init_db()
     start_delete_worker()
+    start_api_executors()
     configure_bot_menu()
     logging.info(
-        "Bot started workers=%s max_inflight=%s api_timeout=%s poll_timeout=%s",
+        "Bot started workers=%s max_inflight=%s api_send_workers=%s api_fast_workers=%s api_timeout=%s poll_timeout=%s",
         UPDATE_WORKERS,
         MAX_INFLIGHT_UPDATES,
+        API_SEND_WORKERS,
+        API_FAST_WORKERS,
         API_TIMEOUT,
         POLL_TIMEOUT,
     )
-    poll_loop()
+    try:
+        poll_loop()
+    finally:
+        stop_api_executors()
 
 
 if __name__ == "__main__":
