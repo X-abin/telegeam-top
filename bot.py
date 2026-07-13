@@ -8,6 +8,7 @@ import copy
 import json
 import logging
 import os
+import threading
 import random
 import sqlite3
 import sys
@@ -17,6 +18,11 @@ from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+try:
+    from queue import Queue
+except ImportError:
+    from Queue import Queue
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +69,8 @@ API_BASE = "https://api.telegram.org/bot{0}/".format(BOT_TOKEN)
 ADMIN_STATES = {}
 VERIFY_STATES = {}
 CLEANUP_MESSAGES = {}
+DELETE_QUEUE = Queue()
+DELETE_WORKER_STARTED = False
 CAPTCHA_TTL_SECONDS = 120
 
 
@@ -228,7 +236,7 @@ def send_message(chat_id, text, reply_markup=None):
     return api_call("sendMessage", data)
 
 
-def delete_message(chat_id, message_id):
+def delete_message_now(chat_id, message_id):
     if not chat_id or not message_id:
         return False
     try:
@@ -236,6 +244,38 @@ def delete_message(chat_id, message_id):
         return True
     except Exception as exc:
         logging.debug("deleteMessage ignored chat=%s message=%s error=%s", chat_id, message_id, exc)
+        return False
+
+
+def delete_worker():
+    while True:
+        chat_id, message_id = DELETE_QUEUE.get()
+        try:
+            delete_message_now(chat_id, message_id)
+        except Exception as exc:
+            logging.debug("delete worker ignored chat=%s message=%s error=%s", chat_id, message_id, exc)
+        finally:
+            DELETE_QUEUE.task_done()
+
+
+def start_delete_worker():
+    global DELETE_WORKER_STARTED
+    if DELETE_WORKER_STARTED:
+        return
+    DELETE_WORKER_STARTED = True
+    worker = threading.Thread(target=delete_worker, name="delete-message-worker")
+    worker.daemon = True
+    worker.start()
+
+
+def delete_message(chat_id, message_id):
+    if not chat_id or not message_id:
+        return False
+    try:
+        DELETE_QUEUE.put_nowait((chat_id, message_id))
+        return True
+    except Exception as exc:
+        logging.debug("deleteMessage enqueue ignored chat=%s message=%s error=%s", chat_id, message_id, exc)
         return False
 
 
@@ -2291,6 +2331,7 @@ def main():
     ensure_dirs()
     setup_logging()
     init_db()
+    start_delete_worker()
     configure_bot_menu()
     logging.info("Bot started")
     poll_loop()
