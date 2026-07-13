@@ -10,6 +10,7 @@ import logging
 import os
 import threading
 import random
+import socket
 import sqlite3
 import sys
 import time
@@ -220,12 +221,13 @@ def init_db():
         )
 
 
-def api_call(method, data=None):
+def api_call(method, data=None, timeout=None):
     if data is None:
         data = {}
     body = urlencode(data).encode("utf-8")
     request = Request(API_BASE + method, data=body)
-    with urlopen(request, timeout=API_TIMEOUT) as response:
+    request_timeout = timeout if timeout is not None else API_TIMEOUT
+    with urlopen(request, timeout=request_timeout) as response:
         payload = response.read().decode("utf-8")
     result = json.loads(payload)
     if not result.get("ok"):
@@ -2506,11 +2508,11 @@ def poll_loop():
                 params = {"timeout": POLL_TIMEOUT}
                 if offset is not None:
                     params["offset"] = offset
-                updates = api_call("getUpdates", params)
+                updates = api_call("getUpdates", params, timeout=POLL_TIMEOUT + 10)
                 for update in updates:
                     offset = update["update_id"] + 1
                     submit_update(update)
-            except (HTTPError, URLError, RuntimeError, sqlite3.Error) as exc:
+            except (HTTPError, URLError, RuntimeError, sqlite3.Error, socket.timeout, TimeoutError) as exc:
                 logging.exception("Polling error: %s", exc)
                 time.sleep(2)
             except KeyboardInterrupt:
