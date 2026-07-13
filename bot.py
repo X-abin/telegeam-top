@@ -3657,10 +3657,11 @@ def group_choose_keyboard(scope, user_id, token):
         [{"text": "⌨️ 手动输入", "callback_data": "{0}:manual_group_id".format(scope)}],
     ]
     if scope == "defaults":
-        rows.append([
-            {"text": "⬅️ 返回", "callback_data": "defaults:back_menu"},
-            {"text": "✅ 完成", "callback_data": "defaults:done"},
-        ])
+        state = ADMIN_STATES.get(user_id) or {}
+        row = [{"text": "⬅️ 返回", "callback_data": "defaults:back_menu"}]
+        if state.get("return_state"):
+            row.append({"text": "↩ 返回草稿", "callback_data": "defaults:done"})
+        rows.append(row)
     else:
         rows.append([
             {"text": "⬅️ 返回", "callback_data": "draft:edit_conditions"},
@@ -3844,6 +3845,141 @@ def handle_group_bind_message(message):
     return True
 
 
+def chat_info_for_target(target):
+    target = parse_nullable_text(str(target or ""))
+    if not target:
+        return None
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT chat_id, title, username, chat_type FROM chat_infos WHERE chat_id = ?",
+            (target,),
+        ).fetchone()
+        if row:
+            return row
+        if target.startswith("@"):
+            return conn.execute(
+                "SELECT chat_id, title, username, chat_type FROM chat_infos WHERE lower(username) = lower(?)",
+                (target[1:],),
+            ).fetchone()
+    return None
+
+
+def target_name_html(target, link=None):
+    target = parse_nullable_text(str(target or ""))
+    if not target:
+        return "<i>未绑定</i>"
+    info = chat_info_for_target(target)
+    title = None
+    if info:
+        title = info["title"] or (("@{0}".format(info["username"])) if info["username"] else None)
+    if not title:
+        title = target if target.startswith("@") else "未命名群聊/频道"
+    label = html.escape(str(title))
+    escaped_target = html.escape(str(target))
+    if link:
+        label = '<a href="{0}">{1}</a>'.format(html.escape(str(link), quote=True), label)
+    else:
+        label = "<b>{0}</b>".format(label)
+    return "{0} <code>{1}</code>".format(label, escaped_target)
+
+
+def subscription_display_html(data):
+    target = data_value(data, "required_channel_id")
+    link = data_value(data, "required_channel_link") or default_subscription_link(target)
+    return target_name_html(target, link)
+
+
+def settings_status_lines(data):
+    group_id = data.get("required_group_id")
+    group_messages = int(data.get("required_group_messages") or 0)
+    channel_id = data.get("required_channel_id")
+    return [
+        "群聊：{0}".format(target_name_html(group_id)) if group_id else "群聊：<i>未绑定</i>",
+        "发言数：<b>{0}</b>".format(group_messages) if group_messages > 0 else "发言数：<i>未设置</i>",
+        "频道：{0}".format(subscription_display_html(data)) if channel_id else "频道：<i>未绑定</i>",
+    ]
+
+
+def render_defaults_panel(data):
+    return (
+        "<b>⚙️ 默认条件设置</b>\n\n"
+        + "\n".join("• " + line for line in settings_status_lines(data))
+        + "\n\n"
+        "<i>这些值只会带入新批次，已创建的批次不会被修改。</i>"
+    )
+
+
+def render_condition_lines(data):
+    group_id = data.get("required_group_id")
+    group_messages = int(data.get("required_group_messages") or 0)
+    channel_id = data.get("required_channel_id")
+    lines = []
+    if group_id:
+        if group_messages > 0:
+            lines.append(
+                "• <b>群发言数</b>：{0} 普通发言 <b>至少 {1}</b>".format(
+                    target_name_html(group_id),
+                    group_messages,
+                )
+            )
+        else:
+            lines.append(
+                "• <b>绑定群聊</b>：{0}\n"
+                "  发言数量：<i>未设置，暂不启用群发言限制</i>".format(target_name_html(group_id))
+            )
+    else:
+        lines.append("• <b>绑定群聊</b>：<i>未绑定</i>")
+        lines.append("• <b>发言数量</b>：<i>未设置</i>")
+    if channel_id:
+        lines.append("• <b>频道订阅</b>：必须订阅 {0}".format(subscription_display_html(data)))
+    else:
+        lines.append("• <b>频道订阅</b>：<i>未启用</i>")
+    return lines
+
+
+def defaults_keyboard(return_state=None):
+    rows = [
+        [
+            {"text": "💬 绑定群聊", "callback_data": "defaults:group_chat"},
+            {"text": "🔢 发言数量", "callback_data": "defaults:group_messages"},
+        ],
+        [
+            {"text": "📢 绑定频道", "callback_data": "defaults:channel_id"},
+            {"text": "🧹 清空条件", "callback_data": "defaults:clear"},
+        ],
+    ]
+    if return_state:
+        rows.append([{"text": "↩ 返回草稿", "callback_data": "defaults:done"}])
+    return {"inline_keyboard": rows}
+
+
+def defaults_input_keyboard(back_data="defaults:back_menu"):
+    return {
+        "inline_keyboard": [
+            [{"text": "⬅️ 返回", "callback_data": back_data}],
+        ]
+    }
+
+
+def show_defaults_screen(chat_id, user_id, message_id=None):
+    state = ADMIN_STATES.get(user_id)
+    data = state.get("data") if state else None
+    return_state = state.get("return_state") if state else None
+    if not data:
+        with db_connect() as conn:
+            data = load_default_conditions(conn)
+    text = render_defaults_panel(data)
+    keyboard = defaults_keyboard(return_state)
+    if message_id:
+        result = safe_edit_message_text(chat_id, message_id, text, keyboard)
+        if result:
+            CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        else:
+            send_flow_message(chat_id, user_id, text, keyboard)
+    else:
+        send_flow_message(chat_id, user_id, text, keyboard)
+
+
 def handle_defaults_state(chat_id, user_id, text):
     state = ADMIN_STATES.get(user_id)
     if not state or state.get("action") != "defaults":
@@ -3855,7 +3991,7 @@ def handle_defaults_state(chat_id, user_id, text):
         return False
 
     if state["step"] == "menu":
-        send_flow_message(chat_id, user_id, "请点击面板里的按钮修改默认条件，或点击完成退出。", defaults_keyboard())
+        send_flow_message(chat_id, user_id, "请点击面板按钮修改默认条件。", defaults_keyboard(state.get("return_state")))
         return True
 
     if state["step"] == "group_chat_choose":
