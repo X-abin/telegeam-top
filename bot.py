@@ -2123,6 +2123,9 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
 
     if state["step"] == "condition_input":
         field = state.get("pending_field")
+        if field == "required_channel_id" and text.strip() != "0":
+            send_flow_message(chat_id, user_id, ask_condition_value(chat_id, field), draft_input_keyboard("draft:edit_conditions"))
+            return True
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
@@ -2538,6 +2541,9 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
 
     if state["step"] == "condition_input":
         field = state.get("pending_field")
+        if field == "required_channel_id" and text.strip() != "0":
+            send_flow_message(chat_id, user_id, ask_condition_value(chat_id, field), draft_input_keyboard("draft:edit_conditions"))
+            return True
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
@@ -2705,6 +2711,365 @@ def handle_draft_callback(callback_query):
         create_batch_from_draft(chat_id, user_id)
 
 
+def admin_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "📦 创建批次"}, {"text": "📋 批次列表"}, {"text": "🗒 最近记录"}],
+            [{"text": "⚙️ 默认条件"}, {"text": "🧩 核心流程"}, {"text": "📊 已记录群"}],
+            [{"text": "👤 我的ID"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+def defaults_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💬 群发言条件", "callback_data": "defaults:group_condition"},
+                {"text": "📢 频道订阅", "callback_data": "defaults:channel_id"},
+            ],
+            [
+                {"text": "🧹 清空条件", "callback_data": "defaults:clear"},
+                {"text": "✅ 完成", "callback_data": "defaults:done"},
+            ],
+        ]
+    }
+
+
+def defaults_input_keyboard(back_data="defaults:done"):
+    return {
+        "inline_keyboard": [
+            [{"text": "⬅️ 返回默认条件", "callback_data": back_data}],
+            [{"text": "✅ 完成", "callback_data": "defaults:done"}],
+        ]
+    }
+
+
+def ask_condition_value(chat_id, field):
+    if field == "required_channel_id":
+        return (
+            "<b>📢 设置频道订阅</b>\n\n"
+            "请从目标频道转发任意一条消息到这里，Bot 会自动识别并绑定频道。\n\n"
+            "<blockquote>绑定后我会检测 Bot 是否已在该频道内。"
+            "如果检测不到，请把 Bot 拉进频道，并给它查看成员/管理员相关权限。</blockquote>\n\n"
+            "如需关闭频道订阅条件，请发送 <code>0</code>。"
+        )
+    return "请输入内容。"
+
+
+def normalize_main_menu_text(text):
+    return {
+        "📦 创建批次": "/newbatch",
+        "📋 批次列表": "/batches",
+        "🗒 最近记录": "/records",
+        "⚙️ 默认条件": "/defaults",
+        "🧩 核心流程": "/flow",
+        "📊 已记录群": "/groups",
+        "👤 我的ID": "/whoami",
+    }.get(text, text)
+
+
+def is_main_menu_command(text):
+    return text in ("/newbatch", "/batches", "/records", "/defaults", "/flow", "/groups", "/whoami")
+
+
+def bot_membership_note(target_id):
+    try:
+        bot_info = api_call("getMe")
+        bot_id = bot_info.get("id")
+    except Exception:
+        bot_id = None
+    member = get_chat_member(target_id, bot_id) if bot_id else None
+    if member_is_joined(member):
+        return "✅ 已检测到 Bot 在目标频道/群内。"
+    return "⚠️ 暂未检测到 Bot 在目标频道/群内。请把 Bot 拉进去，并给它必要权限后再让用户领取。"
+
+
+def bind_subscription_from_forward(chat_id, user_id, message):
+    state = ADMIN_STATES.get(user_id)
+    if not state:
+        return False
+    if state.get("action") == "newbatch_v2":
+        pending = state.get("step") == "condition_input" and state.get("pending_field") == "required_channel_id"
+    elif state.get("action") == "defaults":
+        pending = state.get("step") == "edit" and state.get("pending_field") == "required_channel_id"
+    else:
+        pending = False
+    if not pending:
+        return False
+
+    forwarded_chat = forwarded_chat_from_message(message)
+    if not forwarded_chat or not forwarded_chat.get("id"):
+        send_flow_message(chat_id, user_id, "没有识别到频道来源。请直接从目标频道转发一条消息过来。", defaults_input_keyboard() if state.get("action") == "defaults" else draft_input_keyboard("draft:edit_conditions"))
+        return True
+
+    target_id = str(forwarded_chat.get("id"))
+    title = forwarded_chat.get("title") or forwarded_chat.get("username") or target_id
+    username = forwarded_chat.get("username")
+    link = "https://t.me/{0}".format(username) if username else None
+    remember_chat_info(forwarded_chat)
+
+    state["data"]["required_channel_id"] = target_id
+    state["data"]["required_channel_link"] = link
+    normalize_condition_data(state["data"])
+    note = bot_membership_note(target_id)
+
+    if state.get("action") == "defaults":
+        with db_connect() as conn:
+            set_setting(conn, "default_required_channel_id", state["data"].get("required_channel_id") or "")
+            set_setting(conn, "default_required_channel_link", state["data"].get("required_channel_link") or "")
+        state["step"] = "menu"
+        state["pending_field"] = None
+        send_flow_message(
+            chat_id,
+            user_id,
+            "<b>✅ 频道订阅已绑定</b>\n\n频道：<b>{0}</b>\n检测 ID：<code>{1}</code>\n\n{2}".format(
+                html.escape(title),
+                html.escape(target_id),
+                note,
+            ),
+            defaults_keyboard(),
+        )
+    else:
+        state["step"] = "conditions"
+        state["pending_field"] = None
+        send_flow_message(
+            chat_id,
+            user_id,
+            "<b>✅ 频道订阅已绑定</b>\n\n频道：<b>{0}</b>\n检测 ID：<code>{1}</code>\n\n{2}".format(
+                html.escape(title),
+                html.escape(target_id),
+                note,
+            ),
+            condition_edit_keyboard(),
+        )
+    return True
+
+
+def handle_forwarded_chat(chat_id, user_id, message):
+    if not is_admin(user_id):
+        return False
+    if bind_subscription_from_forward(chat_id, user_id, message):
+        return True
+    forwarded_chat = forwarded_chat_from_message(message)
+    if not forwarded_chat or not forwarded_chat.get("id"):
+        return False
+    target_id = str(forwarded_chat.get("id"))
+    title = forwarded_chat.get("title") or forwarded_chat.get("username") or target_id
+    username = forwarded_chat.get("username")
+    current = now_text()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO chat_infos
+                (chat_id, title, username, chat_type, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (target_id, title, username, forwarded_chat.get("type"), current),
+        )
+    link = "https://t.me/{0}".format(username) if username else ""
+    lines = [
+        "<b>📌 已识别转发来源</b>",
+        "",
+        "• 名称：{0}".format(html.escape(title)),
+        "• Chat ID：<code>{0}</code>".format(html.escape(target_id)),
+    ]
+    if link:
+        lines.append("• 公开链接：<code>{0}</code>".format(html.escape(link)))
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+    return True
+
+
+def show_seen_groups(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, "你不是管理员。")
+        return
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                c.chat_id,
+                c.title,
+                c.username,
+                c.chat_type,
+                c.last_seen_at,
+                COUNT(s.telegram_id) AS user_count,
+                COALESCE(SUM(s.message_count), 0) AS message_count
+            FROM chat_infos c
+            LEFT JOIN user_chat_stats s ON s.chat_id = c.chat_id
+            GROUP BY c.chat_id, c.title, c.username, c.chat_type, c.last_seen_at
+            ORDER BY c.last_seen_at DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    if not rows:
+        send_message(
+            chat_id,
+            "<b>📊 已记录群</b>\n\n"
+            "<i>暂时没有记录到群消息。</i>\n\n"
+            "请把 Bot 加入目标群，并确保 BotFather 的 Privacy Mode 已关闭。"
+            "之后让群里发一条普通消息，这里就会出现可复制的群 ID。",
+            admin_keyboard(),
+        )
+        return
+    lines = [
+        "<b>📊 已记录群</b>",
+        "<i>创建批次时，群发言条件请复制这里的 Chat ID。</i>",
+    ]
+    for index, row in enumerate(rows, 1):
+        username = "@{0}".format(row["username"]) if row["username"] else "-"
+        lines.append(
+            "\n<b>{0}. {1}</b>\n"
+            "<blockquote>"
+            "Chat ID：<code>{2}</code>\n"
+            "类型：{3}\n"
+            "统计用户：{4} 人\n"
+            "累计发言：{5} 条\n"
+            "用户名：{6}\n"
+            "最近记录：{7}"
+            "</blockquote>".format(
+                index,
+                html.escape(row["title"] or row["chat_id"]),
+                html.escape(row["chat_id"]),
+                html.escape(row["chat_type"] or "-"),
+                row["user_count"] or 0,
+                row["message_count"] or 0,
+                html.escape(username),
+                html.escape(row["last_seen_at"] or "-"),
+            )
+        )
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def handle_defaults_callback(callback_query):
+    user = callback_query.get("from") or {}
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    user_id = user.get("id")
+    data = (callback_query.get("data") or "").split(":", 1)[1]
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "defaults":
+        answer_callback_query(callback_query.get("id"), "请先打开默认条件面板。", show_alert=True)
+        return
+
+    answer_callback_query(callback_query.get("id"))
+    if data == "group_condition":
+        state["step"] = "group_condition_id"
+        state["pending_group_id"] = None
+        send_flow_message(chat_id, user_id, ask_group_condition_id(), defaults_input_keyboard())
+    elif data == "channel_id":
+        state["step"] = "edit"
+        state["pending_field"] = "required_channel_id"
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_channel_id"), defaults_input_keyboard())
+    elif data == "clear":
+        state["data"]["required_group_id"] = None
+        state["data"]["required_group_messages"] = 0
+        state["data"]["required_channel_id"] = None
+        state["data"]["required_channel_link"] = None
+        with db_connect() as conn:
+            set_setting(conn, "default_required_group_id", "")
+            set_setting(conn, "default_required_group_messages", "0")
+            set_setting(conn, "default_required_channel_id", "")
+            set_setting(conn, "default_required_channel_link", "")
+        show_defaults_screen(chat_id, user_id, message_id)
+    elif data == "done":
+        return_state = state.get("return_state")
+        if return_state:
+            ADMIN_STATES[user_id] = return_state
+            clear_flow_message(chat_id, user_id)
+            send_message(chat_id, "<b>✅ 默认条件已保存，已返回批次草稿。</b>", admin_keyboard())
+            if return_state.get("step") == "conditions":
+                show_batch_condition_screen(chat_id, user_id)
+            elif return_state.get("step") == "confirm":
+                show_batch_preview(chat_id, user_id)
+        else:
+            ADMIN_STATES.pop(user_id, None)
+            clear_flow_message(chat_id, user_id)
+            send_message(chat_id, "<b>✅ 默认条件已保存。</b>", admin_keyboard())
+
+
+def handle_defaults_state(chat_id, user_id, text):
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "defaults":
+        return False
+
+    if is_main_menu_command(text) and text != "/defaults":
+        ADMIN_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
+        return False
+
+    if state["step"] == "menu":
+        send_flow_message(chat_id, user_id, "请点击面板里的按钮修改默认条件，或点击完成退出。", defaults_keyboard())
+        return True
+
+    if state["step"] == "edit":
+        field = state.get("pending_field")
+        if field == "required_channel_id" and text.strip() != "0":
+            send_flow_message(chat_id, user_id, ask_condition_value(chat_id, field), defaults_input_keyboard())
+            return True
+        try:
+            apply_condition_input(state, field, text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            return True
+        with db_connect() as conn:
+            set_setting(conn, "default_required_group_id", state["data"].get("required_group_id") or "")
+            set_setting(conn, "default_required_group_messages", str(state["data"].get("required_group_messages") or 0))
+            set_setting(conn, "default_required_channel_id", state["data"].get("required_channel_id") or "")
+            set_setting(conn, "default_required_channel_link", state["data"].get("required_channel_link") or "")
+        state["step"] = "menu"
+        state["pending_field"] = None
+        show_defaults_screen(chat_id, user_id)
+        return True
+
+    if state["step"] == "group_condition_id":
+        try:
+            group_id = validate_group_chat_id(text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            return True
+        if not group_id:
+            state["data"]["required_group_id"] = None
+            state["data"]["required_group_messages"] = 0
+            with db_connect() as conn:
+                set_setting(conn, "default_required_group_id", "")
+                set_setting(conn, "default_required_group_messages", "0")
+            state["step"] = "menu"
+            state["pending_group_id"] = None
+            show_defaults_screen(chat_id, user_id)
+            return True
+        state["pending_group_id"] = group_id
+        state["step"] = "group_condition_messages"
+        send_flow_message(chat_id, user_id, ask_group_condition_messages(group_id), defaults_input_keyboard())
+        return True
+
+    if state["step"] == "group_condition_messages":
+        try:
+            group_messages = parse_nonnegative_int(text, "群发言数")
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            return True
+        if group_messages <= 0:
+            send_flow_message(chat_id, user_id, "群发言数必须大于 0；如需关闭条件，请重新点击群发言条件并输入 0。", defaults_input_keyboard())
+            return True
+        state["data"]["required_group_id"] = state.get("pending_group_id")
+        state["data"]["required_group_messages"] = group_messages
+        state["pending_group_id"] = None
+        normalize_condition_data(state["data"])
+        with db_connect() as conn:
+            set_setting(conn, "default_required_group_id", state["data"].get("required_group_id") or "")
+            set_setting(conn, "default_required_group_messages", str(state["data"].get("required_group_messages") or 0))
+        state["step"] = "menu"
+        show_defaults_screen(chat_id, user_id)
+        return True
+
+    return False
+
+
 def handle_chatid(chat_id, message):
     chat = message.get("chat") or {}
     title = chat.get("title") or chat.get("username") or "当前会话"
@@ -2745,6 +3110,7 @@ def process_message(message):
         "👤 我的ID": "/whoami",
         "⬅️ 取消": "取消操作",
     }.get(text, text)
+    text = normalize_main_menu_text(text)
     chat_id = chat.get("id")
     user_id = user.get("id")
     if not chat_id or not user_id:
@@ -2780,7 +3146,7 @@ def process_message(message):
     elif text.startswith("/groups") or text in ("📊 已记录群", "已记录群"):
         show_seen_groups(chat_id, user_id)
     elif text.startswith("/botstatus") or text in ("🛡 接收状态", "接收状态"):
-        show_bot_receive_status(chat_id, user_id)
+        send_message(chat_id, "<b>该功能已移除。</b>", admin_keyboard())
     elif text.startswith("/defaults") or text == "⚙️ 默认条件":
         begin_defaults_screen(chat_id, user_id)
     elif text.startswith("/newbatch") or text in ("创建批次", "创建兑换码批次", "📦 创建批次"):
@@ -2801,6 +3167,43 @@ def process_message(message):
             send_message(chat_id, "<b>请选择管理员操作。</b>", admin_keyboard())
         else:
             send_message(chat_id, "请通过管理员分享的专属领取链接进入。")
+
+
+def configure_bot_menu():
+    user_commands = [
+        {"command": "start", "description": "通过专属链接领取兑换码"},
+        {"command": "whoami", "description": "查看自己的 Telegram User ID"},
+    ]
+    admin_commands = user_commands + [
+        {"command": "admin", "description": "管理员面板"},
+        {"command": "newbatch", "description": "创建兑换码批次"},
+        {"command": "defaults", "description": "设置默认领取条件"},
+        {"command": "batches", "description": "查看批次列表"},
+        {"command": "batch", "description": "查看批次详情"},
+        {"command": "records", "description": "查看最近领取记录"},
+        {"command": "flow", "description": "查看核心流程"},
+        {"command": "groups", "description": "查看已记录群 ID"},
+        {"command": "chatid", "description": "查看当前会话 ID"},
+    ]
+    api_call("deleteWebhook", {"drop_pending_updates": "false"})
+    api_call("deleteMyCommands")
+    api_call("deleteMyCommands", {"scope": json.dumps({"type": "all_group_chats"})})
+    api_call("deleteMyCommands", {"scope": json.dumps({"type": "all_chat_administrators"})})
+    api_call(
+        "setMyCommands",
+        {
+            "scope": json.dumps({"type": "all_private_chats"}),
+            "commands": json.dumps(user_commands, ensure_ascii=False),
+        },
+    )
+    for admin_id in ADMIN_IDS:
+        api_call(
+            "setMyCommands",
+            {
+                "scope": json.dumps({"type": "chat", "chat_id": admin_id}),
+                "commands": json.dumps(admin_commands, ensure_ascii=False),
+            },
+        )
 
 
 def get_update_user_id(update):
