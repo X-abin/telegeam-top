@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import time
 import uuid
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from urllib.error import HTTPError, URLError
@@ -282,6 +283,74 @@ def api_call(method, data=None, timeout=None):
     raise RuntimeError("Telegram API failed after retries: {0}".format(last_error))
 
 
+def api_call_multipart(method, fields=None, files=None, timeout=None):
+    if fields is None:
+        fields = {}
+    if files is None:
+        files = {}
+    request_timeout = timeout if timeout is not None else API_TIMEOUT
+    last_error = None
+    for attempt in range(API_MAX_RETRIES + 1):
+        boundary = "----codexbot{0}".format(uuid.uuid4().hex)
+        chunks = []
+        for name, value in fields.items():
+            chunks.append("--{0}\r\n".format(boundary).encode("utf-8"))
+            chunks.append('Content-Disposition: form-data; name="{0}"\r\n\r\n'.format(name).encode("utf-8"))
+            chunks.append(str(value).encode("utf-8"))
+            chunks.append(b"\r\n")
+        for name, file_info in files.items():
+            filename, content_type, content = file_info
+            chunks.append("--{0}\r\n".format(boundary).encode("utf-8"))
+            chunks.append(
+                'Content-Disposition: form-data; name="{0}"; filename="{1}"\r\n'.format(name, filename).encode("utf-8")
+            )
+            chunks.append("Content-Type: {0}\r\n\r\n".format(content_type).encode("utf-8"))
+            chunks.append(content)
+            chunks.append(b"\r\n")
+        chunks.append("--{0}--\r\n".format(boundary).encode("utf-8"))
+        body = b"".join(chunks)
+        request = Request(API_BASE + method, data=body)
+        request.add_header("Content-Type", "multipart/form-data; boundary={0}".format(boundary))
+        request.add_header("Content-Length", str(len(body)))
+        try:
+            with urlopen(request, timeout=request_timeout) as response:
+                payload = response.read().decode("utf-8")
+            result = json.loads(payload)
+            if not result.get("ok"):
+                parameters = result.get("parameters") or {}
+                retry_after = parameters.get("retry_after")
+                if retry_after and attempt < API_MAX_RETRIES:
+                    time.sleep(min(float(retry_after), API_RETRY_MAX_SLEEP))
+                    continue
+                raise RuntimeError("Telegram API error: {0}".format(result))
+            return result["result"]
+        except HTTPError as exc:
+            last_error = exc
+            retry_after = None
+            try:
+                payload = exc.read().decode("utf-8")
+                error_result = json.loads(payload)
+                retry_after = (error_result.get("parameters") or {}).get("retry_after")
+            except Exception:
+                error_result = None
+            if exc.code == 429 and attempt < API_MAX_RETRIES:
+                time.sleep(min(float(retry_after or 1), API_RETRY_MAX_SLEEP))
+                continue
+            if exc.code >= 500 and attempt < API_MAX_RETRIES:
+                time.sleep(min(0.5 * (attempt + 1), API_RETRY_MAX_SLEEP))
+                continue
+            if error_result:
+                raise RuntimeError("Telegram API HTTP error: {0}".format(error_result))
+            raise
+        except (URLError, socket.timeout, TimeoutError) as exc:
+            last_error = exc
+            if attempt < API_MAX_RETRIES:
+                time.sleep(min(0.5 * (attempt + 1), API_RETRY_MAX_SLEEP))
+                continue
+            raise
+    raise RuntimeError("Telegram multipart API failed after retries: {0}".format(last_error))
+
+
 def send_message(chat_id, text, reply_markup=None):
     data = {
         "chat_id": chat_id,
@@ -292,6 +361,22 @@ def send_message(chat_id, text, reply_markup=None):
     if reply_markup is not None:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     return api_call("sendMessage", data)
+
+
+def send_photo(chat_id, photo_bytes, caption=None, reply_markup=None):
+    fields = {
+        "chat_id": chat_id,
+        "parse_mode": "HTML",
+    }
+    if caption:
+        fields["caption"] = caption
+    if reply_markup is not None:
+        fields["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    return api_call_multipart(
+        "sendPhoto",
+        fields,
+        {"photo": ("captcha.png", "image/png", photo_bytes)},
+    )
 
 
 def delete_message_now(chat_id, message_id):
@@ -408,6 +493,32 @@ def send_flow_message_async(chat_id, user_id, text, reply_markup=None, replace_p
     return future
 
 
+def send_flow_photo_async(chat_id, user_id, photo_bytes, caption=None, reply_markup=None, replace_previous=True):
+    key = cleanup_key(chat_id, user_id)
+    generation = bump_flow_generation(key)
+    if replace_previous:
+        delete_message(chat_id, pop_cleanup_message(key))
+    future = send_photo_async(chat_id, photo_bytes, caption, reply_markup)
+
+    def remember_future_photo(done_future):
+        try:
+            result = done_future.result()
+            message_id = result.get("message_id") if isinstance(result, dict) else None
+            if message_id:
+                remember_cleanup_message(key, generation, chat_id, message_id)
+        except Exception as exc:
+            logging.warning("async flow photo failed chat=%s user=%s error=%s", chat_id, user_id, exc)
+
+    if hasattr(future, "add_done_callback"):
+        future.add_done_callback(remember_future_photo)
+    else:
+        result = future
+        message_id = result.get("message_id") if isinstance(result, dict) else None
+        if message_id:
+            remember_cleanup_message(key, generation, chat_id, message_id)
+    return future
+
+
 def clear_flow_message(chat_id, user_id):
     key = cleanup_key(chat_id, user_id)
     bump_flow_generation(key)
@@ -442,6 +553,10 @@ def submit_async_api(executor, fn, *args, **kwargs):
 
 def send_message_async(chat_id, text, reply_markup=None):
     return submit_async_api(API_SEND_EXECUTOR, send_message, chat_id, text, reply_markup)
+
+
+def send_photo_async(chat_id, photo_bytes, caption=None, reply_markup=None):
+    return submit_async_api(API_SEND_EXECUTOR, send_photo, chat_id, photo_bytes, caption, reply_markup)
 
 
 def answer_callback_query_async(callback_query_id, text=None, show_alert=False):
@@ -1049,6 +1164,175 @@ def verify_keyboard(token, choices):
     }
 
 
+CAPTCHA_FONT = {
+    "0": ["111", "101", "101", "101", "111"],
+    "1": ["010", "110", "010", "010", "111"],
+    "2": ["111", "001", "111", "100", "111"],
+    "3": ["111", "001", "111", "001", "111"],
+    "4": ["101", "101", "111", "001", "001"],
+    "5": ["111", "100", "111", "001", "111"],
+    "6": ["111", "100", "111", "101", "111"],
+    "7": ["111", "001", "010", "010", "010"],
+    "8": ["111", "101", "111", "101", "111"],
+    "9": ["111", "101", "111", "001", "111"],
+    "+": ["000", "010", "111", "010", "000"],
+    "-": ["000", "000", "111", "000", "000"],
+    "x": ["000", "101", "010", "101", "000"],
+    "/": ["001", "001", "010", "100", "100"],
+    "(": ["011", "100", "100", "100", "011"],
+    ")": ["110", "001", "001", "001", "110"],
+    "=": ["000", "111", "000", "111", "000"],
+    "?": ["111", "001", "010", "000", "010"],
+    " ": ["0", "0", "0", "0", "0"],
+}
+
+
+def captcha_expression():
+    template = random.randint(1, 5)
+    if template == 1:
+        answer = random.randint(120, 980)
+        offset = random.randint(37, 240)
+        factor = random.randint(4, 16)
+        subtract = random.randint(150, 1800)
+        result = (answer + offset) * factor - subtract
+        expression = "((? + {0}) x {1}) - {2} = {3}".format(offset, factor, subtract, result)
+    elif template == 2:
+        offset = random.randint(25, 180)
+        answer = random.randint(offset + 80, 1100)
+        factor = random.randint(5, 18)
+        add = random.randint(90, 1600)
+        result = (answer - offset) * factor + add
+        expression = "((? - {0}) x {1}) + {2} = {3}".format(offset, factor, add, result)
+    elif template == 3:
+        answer = random.randint(80, 720)
+        factor = random.randint(3, 14)
+        divisor = random.randint(2, 9)
+        add = random.randint(100, 900)
+        remainder = (answer * factor + add) % divisor
+        if remainder:
+            add += divisor - remainder
+        result = (answer * factor + add) // divisor
+        expression = "((? x {0}) + {1}) / {2} = {3}".format(factor, add, divisor, result)
+    elif template == 4:
+        answer = random.randint(120, 850)
+        factor = random.randint(4, 12)
+        divisor = random.randint(2, 9)
+        max_result = max(21, (answer * factor - 120) // divisor)
+        result = random.randint(20, max_result)
+        subtract = answer * factor - result * divisor
+        expression = "(({0} x ?) - {1}) / {2} = {3}".format(factor, subtract, divisor, result)
+    else:
+        answer = random.randint(90, 760)
+        offset = random.randint(12, 140)
+        factor = random.randint(4, 15)
+        left = random.randint(18, 96)
+        right = random.randint(12, 88)
+        result = (answer + offset) * factor + left * right
+        expression = "((? + {0}) x {1}) + ({2} x {3}) = {4}".format(offset, factor, left, right, result)
+    return expression, answer
+
+
+def png_chunk(kind, data):
+    checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+    return len(data).to_bytes(4, "big") + kind + data + checksum.to_bytes(4, "big")
+
+
+def make_png(width, height, pixels):
+    raw_rows = []
+    for y in range(height):
+        start = y * width * 3
+        raw_rows.append(b"\x00" + bytes(pixels[start:start + width * 3]))
+    ihdr = width.to_bytes(4, "big") + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00"
+    return b"\x89PNG\r\n\x1a\n" + png_chunk(b"IHDR", ihdr) + png_chunk(b"IDAT", zlib.compress(b"".join(raw_rows), 9)) + png_chunk(b"IEND", b"")
+
+
+def draw_rect(pixels, width, height, x, y, w, h, color):
+    r, g, b = color
+    for yy in range(max(0, y), min(height, y + h)):
+        for xx in range(max(0, x), min(width, x + w)):
+            index = (yy * width + xx) * 3
+            pixels[index:index + 3] = [r, g, b]
+
+
+def draw_char(pixels, width, height, ch, x, y, scale, color):
+    pattern = CAPTCHA_FONT.get(ch) or CAPTCHA_FONT["?"]
+    char_width = max(len(row) for row in pattern)
+    for row_index, row in enumerate(pattern):
+        for col_index, value in enumerate(row):
+            if value == "1":
+                draw_rect(pixels, width, height, x + col_index * scale, y + row_index * scale, scale, scale, color)
+    return (char_width + 1) * scale
+
+
+def char_pixel_width(ch, scale):
+    pattern = CAPTCHA_FONT.get(ch) or CAPTCHA_FONT["?"]
+    return (max(len(row) for row in pattern) + 1) * scale
+
+
+def text_pixel_width(text, scale):
+    return sum(char_pixel_width(ch, scale) for ch in text)
+
+
+def draw_text(pixels, width, height, text, x, y, scale, color):
+    cursor = x
+    for ch in text:
+        cursor += draw_char(pixels, width, height, ch, cursor, y, scale, color)
+
+
+def wrap_expression(expression, scale, max_width):
+    words = expression.split(" ")
+    lines = []
+    current = ""
+    for word in words:
+        candidate = word if not current else current + " " + word
+        if text_pixel_width(candidate, scale) > max_width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def captcha_image_png(expression):
+    width = 760
+    height = 240
+    background = (246, 248, 252)
+    ink = (22, 31, 45)
+    accent = (190, 204, 222)
+    pixels = bytearray([background[0], background[1], background[2]] * width * height)
+    for _ in range(220):
+        x = random.randint(0, width - 2)
+        y = random.randint(0, height - 2)
+        shade = random.randint(180, 230)
+        draw_rect(pixels, width, height, x, y, random.randint(1, 3), random.randint(1, 3), (shade, shade, shade))
+    for _ in range(18):
+        x = random.randint(0, width - 80)
+        y = random.randint(0, height - 8)
+        draw_rect(pixels, width, height, x, y, random.randint(35, 110), 2, accent)
+    max_text_width = width - 68
+    scale = 9
+    lines = wrap_expression(expression, scale, max_text_width)
+    if len(lines) > 2:
+        scale = 8
+        lines = wrap_expression(expression, scale, max_text_width)
+    if len(lines) > 3:
+        scale = 7
+        lines = wrap_expression(expression, scale, max_text_width)
+    line_height = scale * 7
+    y = max(24, (height - (len(lines) * line_height)) // 2)
+    for line in lines:
+        draw_text(pixels, width, height, line, 34, y, scale, ink)
+        y += line_height
+    return make_png(width, height, pixels)
+
+
+def make_math_captcha():
+    expression, answer = captcha_expression()
+    return str(answer), captcha_image_png(expression)
+
+
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
@@ -1333,7 +1617,7 @@ def handle_flow(chat_id, user_id):
         "5. 导入兑换码并确认创建\n"
         "6. Bot 自动生成唯一领取链接\n"
         "7. 管理员复制链接发到频道、群聊或私聊\n"
-        "8. 用户进入后先做九宫格点击验证\n"
+        "8. 用户进入后先做图片方程验证\n"
         "9. 系统再校验领取条件并自动发码\n"
         "10. 全过程自动记录领取日志\n\n"
         "<i>普通用户没有领取入口，只能通过专属链接领取。</i>",
@@ -1697,7 +1981,7 @@ def begin_claim(chat_id, user, token):
         "• 批次：<b>{0}</b>\n\n"
         "{1}\n\n"
         "<b>🛡 人机验证</b>\n"
-        "请在下方九宫格中点击这个图案：<b>{2}</b>\n\n"
+        "请完成下方人机验证：<b>{2}</b>\n\n"
         "<i>验证码 2 分钟内有效，通过后会自动校验资格并发放兑换码。</i>".format(
             html.escape(batch["name"]),
             "\n".join(condition_lines(batch)),
@@ -2082,7 +2366,7 @@ def show_flow_v2(chat_id, user_id):
         "4. 用按钮调整领取条件\n"
         "5. 导入兑换码并确认创建\n"
         "6. 分享专属领取链接\n"
-        "7. 用户完成九宫格点击验证\n"
+        "7. 用户完成图片方程验证\n"
         "8. 系统校验群发言数 / 频道订阅条件\n"
         "9. 自动发放兑换码并记录日志\n\n"
         "<i>普通用户不会看到领取入口，只能通过专属链接领取。</i>",
@@ -4508,6 +4792,9 @@ def process_message(message):
 
     delete_message(chat_id, message.get("message_id"))
 
+    if handle_captcha_answer(chat_id, user, text):
+        return
+
     if handle_newbatch_v2_state(chat_id, user_id, text):
         return
     if handle_defaults_state(chat_id, user_id, text):
@@ -4772,7 +5059,7 @@ def show_flow_v2(chat_id, user_id):
         "4. 分享专属链接\n\n"
         "<b>用户</b>\n"
         "5. 点击领取链接\n"
-        "6. 完成人机验证\n"
+        "6. 完成图片方程验证\n"
         "7. 系统校验群发言数 / 频道订阅\n"
         "8. 自动发放兑换码\n\n"
         "<blockquote>普通用户没有领取菜单，只能通过专属链接领取。</blockquote>",
@@ -5484,23 +5771,27 @@ def handle_start(chat_id, user, text):
             return
 
     verify_token = uuid.uuid4().hex[:16]
-    target, answer_key, choices = make_captcha()
+    answer, image_bytes = make_math_captcha()
     VERIFY_STATES[user["id"]] = {
+        "mode": "math_image",
         "token": verify_token,
         "batch_token": token,
-        "answer_key": answer_key,
+        "answer": answer,
+        "attempts": 0,
         "expires_at": time.time() + CAPTCHA_TTL_SECONDS,
     }
-    send_flow_message_async(
+    send_flow_photo_async(
         chat_id,
         user["id"],
+        image_bytes,
         "<b>🎁 准备领取</b>\n\n"
         + ui_field("批次", "<b>{0}</b>".format(ui_text(batch["name"]))) + "\n\n"
         + "\n".join(condition_lines(batch)) + "\n\n"
         "<b>🛡 人机验证</b>\n"
-        + ui_field("点击目标", "<b>{0}</b>".format(html.escape(target))) + "\n"
-        + ui_field("有效时间", "<b>2 分钟</b>"),
-        verify_keyboard(verify_token, choices),
+        + ui_field("验证方式", "查看图片方程，只回复 <b>?</b> 对应的整数值") + "\n"
+        + ui_field("有效时间", "<b>2 分钟</b>") + "\n"
+        + ui_field("可尝试", "<b>3 次</b>"),
+        None,
     )
 
 
@@ -5524,6 +5815,69 @@ def handle_chatid(chat_id, message):
         + ui_field("Chat ID", ui_code(chat_id)) + "\n\n"
         "<i>Bot 只在私聊响应；群聊内仅静默统计普通发言。</i>",
     )
+
+
+def normalize_captcha_answer(text):
+    value = (text or "").strip()
+    value = value.translate(str.maketrans("０１２３４５６７８９－＋，", "0123456789-+,"))
+    value = value.replace(",", "").replace(" ", "")
+    if value.startswith("+"):
+        value = value[1:]
+    if value.startswith("-"):
+        sign = "-"
+        value = value[1:]
+    else:
+        sign = ""
+    if not value.isdigit():
+        return None
+    return sign + value
+
+
+def log_captcha_failure(user, batch_token):
+    with db_connect() as conn:
+        upsert_user(conn, user)
+        batch = find_batch(conn, batch_token)
+        if batch:
+            log_claim(conn, user, batch, None, "failed", 0, "captcha_failed")
+
+
+def handle_captcha_answer(chat_id, user, text):
+    user_id = user.get("id")
+    state = VERIFY_STATES.get(user_id)
+    if not state or state.get("mode") != "math_image":
+        return False
+    if text.startswith("/"):
+        return False
+
+    answer = normalize_captcha_answer(text)
+    if answer is None:
+        send_message_async(chat_id, ui_error("验证未通过", "请直接回复图片中 <b>?</b> 对应的整数值。"))
+        return True
+
+    if time.time() > state.get("expires_at", 0):
+        VERIFY_STATES.pop(user_id, None)
+        clear_flow_message(chat_id, user_id)
+        log_captcha_failure(user, state.get("batch_token"))
+        send_message_async(chat_id, ui_error("验证已过期", "请重新打开领取链接后再试。"))
+        return True
+
+    if answer != str(state.get("answer")):
+        attempts = int(state.get("attempts") or 0) + 1
+        state["attempts"] = attempts
+        if attempts >= 3:
+            VERIFY_STATES.pop(user_id, None)
+            clear_flow_message(chat_id, user_id)
+            log_captcha_failure(user, state.get("batch_token"))
+            send_message_async(chat_id, ui_error("验证失败", "答案错误次数过多，本次领取已终止。"))
+            return True
+        remaining = 3 - attempts
+        send_message_async(chat_id, ui_error("答案不正确", ui_field("剩余次数", ui_number(remaining))))
+        return True
+
+    VERIFY_STATES.pop(user_id, None)
+    clear_flow_message(chat_id, user_id)
+    issue_code_v2(chat_id, user, state["batch_token"])
+    return True
 
 
 def configure_bot_menu():
