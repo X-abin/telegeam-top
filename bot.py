@@ -1841,7 +1841,10 @@ def handle_callback(callback_query):
             if batch:
                 log_claim(conn, user, batch, None, "failed", 0, "captcha_failed")
         answer_callback_query(callback_id, "验证失败，请重新打开领取链接。", show_alert=True)
-        send_message(chat_id, "人机验证失败，本次领取已终止。请重新打开领取链接后再试。")
+        send_message(
+            chat_id,
+            ui_error("人机验证失败", "本次领取已终止。\n\n<i>请重新打开领取链接后再试。</i>"),
+        )
         return
     VERIFY_STATES.pop(user_id, None)
     clear_flow_message(chat_id, user_id)
@@ -1850,7 +1853,7 @@ def handle_callback(callback_query):
 
 
 def handle_start(chat_id, user, text):
-    parts = text.split(maxsplit=1)
+    parts = text.split(None, 1)
     if len(parts) < 2:
         if is_admin(user["id"]):
             show_admin_panel_v2(chat_id, user["id"])
@@ -1885,7 +1888,7 @@ def begin_new_batch_v2(chat_id, user_id):
 
 def begin_defaults_screen(chat_id, user_id, return_state=None):
     if not is_admin(user_id):
-        send_message(chat_id, "你不是管理员。")
+        send_message(chat_id, ui_error("权限不足", "你不是管理员，无法修改默认条件。"))
         return
     with db_connect() as conn:
         defaults = load_default_conditions(conn)
@@ -2235,7 +2238,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "confirm":
-        send_flow_message(chat_id, user_id, "请点击下方按钮确认创建，或返回修改。", confirm_keyboard())
+        send_flow_message(
+            chat_id,
+            user_id,
+            ui_notice("等待确认", "请点击下方按钮确认创建，或返回修改。"),
+            confirm_keyboard(),
+        )
         return True
 
     return False
@@ -2533,7 +2541,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
 
     if state["step"] == "name":
         if not text:
-            send_flow_message(chat_id, user_id, "批次名称不能为空。", draft_exit_keyboard())
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("名称不能为空", ui_field("输入类型", "<b>文本名称</b>")),
+                draft_exit_keyboard(),
+            )
             return True
         state["data"]["name"] = text
         state["step"] = "type"
@@ -2546,7 +2559,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         elif text in ("🎁 领完为止", "领完为止", "unique"):
             state["data"]["batch_type"] = "unique"
         else:
-            send_flow_message(chat_id, user_id, "请点击下方按钮选择批次类型。", batch_type_keyboard())
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_notice("请选择批次类型", "请点击下方按钮继续。"),
+                batch_type_keyboard(),
+            )
             return True
         state["step"] = "conditions"
         show_batch_condition_screen(chat_id, user_id)
@@ -2560,7 +2578,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         state["step"] = "conditions"
         state["pending_field"] = None
@@ -2571,7 +2589,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             group_id = validate_group_chat_id(text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         if not group_id:
             state["data"]["required_group_id"] = None
@@ -2589,7 +2607,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             group_messages = parse_nonnegative_int(text, "群发言数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:group_condition"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:group_condition"))
             return True
         if group_messages <= 0:
             send_flow_message(chat_id, user_id, "群发言数必须大于 0；如需关闭条件，请重新点击群发言条件并输入 0。", draft_input_keyboard("draft:group_condition"))
@@ -2606,10 +2624,15 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             usage_limit = parse_nonnegative_int(text, "可用次数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         if usage_limit <= 0:
-            send_flow_message(chat_id, user_id, "可用次数必须大于 0。", draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("输入错误", ui_field("可领取次数", "必须大于 0")),
+                draft_input_keyboard("draft:edit_conditions"),
+            )
             return True
         state["data"]["usage_limit"] = usage_limit
         state["step"] = "usage_code"
@@ -2619,7 +2642,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     if state["step"] == "usage_code":
         code = text.strip()
         if not code:
-            send_flow_message(chat_id, user_id, "兑换码不能为空。", draft_input_keyboard("draft:back_usage_limit"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("兑换码不能为空", ui_field("输入类型", "<b>单个兑换码</b>")),
+                draft_input_keyboard("draft:back_usage_limit"),
+            )
             return True
         state["data"]["shared_code"] = code
         state["step"] = "confirm"
@@ -2629,7 +2657,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     if state["step"] == "codes":
         raw_codes = [line.strip() for line in text.splitlines() if line.strip()]
         if not raw_codes:
-            send_flow_message(chat_id, user_id, "请发送兑换码，每行一个。", draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("兑换码不能为空", ui_field("输入类型", "<b>每行一个兑换码</b>")),
+                draft_input_keyboard("draft:edit_conditions"),
+            )
             return True
         seen = set()
         codes = []
@@ -2647,7 +2680,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "confirm":
-        send_flow_message(chat_id, user_id, "请点击下方按钮确认创建，或返回修改。", confirm_keyboard())
+        send_flow_message(
+            chat_id,
+            user_id,
+            ui_notice("等待确认", "请点击下方按钮确认创建，或返回修改。"),
+            confirm_keyboard(),
+        )
         return True
 
     return False
@@ -2995,7 +3033,7 @@ def handle_defaults_callback(callback_query):
         if return_state:
             ADMIN_STATES[user_id] = return_state
             clear_flow_message(chat_id, user_id)
-            send_message(chat_id, "<b>✅ 默认条件已保存，已返回批次草稿。</b>", admin_keyboard())
+            send_message(chat_id, ui_success("默认条件已保存", "已返回批次草稿。"), admin_keyboard())
             if return_state.get("step") == "conditions":
                 show_batch_condition_screen(chat_id, user_id)
             elif return_state.get("step") == "confirm":
@@ -3003,7 +3041,7 @@ def handle_defaults_callback(callback_query):
         else:
             ADMIN_STATES.pop(user_id, None)
             clear_flow_message(chat_id, user_id)
-            send_message(chat_id, "<b>✅ 默认条件已保存。</b>", admin_keyboard())
+            send_message(chat_id, ui_success("默认条件已保存", "可继续使用下方菜单。"), admin_keyboard())
 
 
 def handle_defaults_state(chat_id, user_id, text):
@@ -3035,7 +3073,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         with db_connect() as conn:
             set_setting(conn, "default_required_group_id", state["data"].get("required_group_id") or "")
@@ -3051,7 +3089,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             group_id = validate_group_chat_id(text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         if not group_id:
             state["data"]["required_group_id"] = None
@@ -3072,7 +3110,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             group_messages = parse_nonnegative_int(text, "群发言数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         if group_messages <= 0:
             send_flow_message(chat_id, user_id, "群发言数必须大于 0；如需关闭条件，请重新点击群发言条件并输入 0。", defaults_input_keyboard())
@@ -3169,7 +3207,7 @@ def show_defaults_screen(chat_id, user_id, message_id=None):
 
 def begin_defaults_screen(chat_id, user_id, return_state=None):
     if not is_admin(user_id):
-        send_message(chat_id, "你不是管理员。")
+        send_message(chat_id, ui_error("权限不足", "你不是管理员，无法修改默认条件。"))
         return
     with db_connect() as conn:
         defaults = load_default_conditions(conn)
@@ -3269,7 +3307,7 @@ def handle_defaults_callback(callback_query):
         if return_state:
             ADMIN_STATES[user_id] = return_state
             clear_flow_message(chat_id, user_id)
-            send_message(chat_id, "<b>✅ 默认条件已保存，已返回批次草稿。</b>", admin_keyboard())
+            send_message(chat_id, ui_success("默认条件已保存", "已返回批次草稿。"), admin_keyboard())
             if return_state.get("step") == "conditions":
                 show_batch_condition_screen(chat_id, user_id)
             elif return_state.get("step") == "confirm":
@@ -3277,7 +3315,7 @@ def handle_defaults_callback(callback_query):
         else:
             ADMIN_STATES.pop(user_id, None)
             clear_flow_message(chat_id, user_id)
-            send_message(chat_id, "<b>✅ 默认条件已保存。</b>", admin_keyboard())
+            send_message(chat_id, ui_success("默认条件已保存", "可继续使用下方菜单。"), admin_keyboard())
 
 
 def handle_defaults_state(chat_id, user_id, text):
@@ -3302,7 +3340,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         save_default_conditions(state["data"])
         state["step"] = "menu"
@@ -3314,7 +3352,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             group_id = validate_group_chat_id(text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         if not group_id:
             state["data"]["required_group_id"] = None
@@ -3331,10 +3369,15 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             group_messages = parse_nonnegative_int(text, "群发言数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         if group_messages <= 0:
-            send_flow_message(chat_id, user_id, "群发言数必须大于 0。", defaults_input_keyboard())
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("输入错误", ui_field("发言数", "必须大于 0")),
+                defaults_input_keyboard(),
+            )
             return True
         state["data"]["required_group_messages"] = group_messages
         normalize_condition_data(state["data"])
@@ -3430,7 +3473,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
 
     if state["step"] == "name":
         if not text:
-            send_flow_message(chat_id, user_id, "批次名称不能为空。", draft_exit_keyboard())
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("名称不能为空", ui_field("输入类型", "<b>文本名称</b>")),
+                draft_exit_keyboard(),
+            )
             return True
         state["data"]["name"] = text
         state["step"] = "type"
@@ -3438,7 +3486,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "type":
-        send_flow_message(chat_id, user_id, "请点击下方按钮选择批次类型。", batch_type_keyboard())
+        send_flow_message(
+            chat_id,
+            user_id,
+            ui_notice("请选择批次类型", "请点击下方按钮继续。"),
+            batch_type_keyboard(),
+        )
         return True
 
     if state["step"] == "group_chat_choose":
@@ -3456,7 +3509,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         state["step"] = "conditions"
         state["pending_field"] = None
@@ -3467,7 +3520,7 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             group_id = validate_group_chat_id(text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         if not group_id:
             state["data"]["required_group_id"] = None
@@ -3483,10 +3536,15 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             group_messages = parse_nonnegative_int(text, "群发言数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         if group_messages <= 0:
-            send_flow_message(chat_id, user_id, "群发言数必须大于 0。", draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("输入错误", ui_field("发言数", "必须大于 0")),
+                draft_input_keyboard("draft:edit_conditions"),
+            )
             return True
         state["data"]["required_group_messages"] = group_messages
         normalize_condition_data(state["data"])
@@ -3498,10 +3556,15 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         try:
             usage_limit = parse_nonnegative_int(text, "可用次数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), draft_input_keyboard("draft:edit_conditions"))
             return True
         if usage_limit <= 0:
-            send_flow_message(chat_id, user_id, "可用次数必须大于 0。", draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("输入错误", ui_field("可领取次数", "必须大于 0")),
+                draft_input_keyboard("draft:edit_conditions"),
+            )
             return True
         state["data"]["usage_limit"] = usage_limit
         state["step"] = "usage_code"
@@ -3511,7 +3574,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     if state["step"] == "usage_code":
         code = text.strip()
         if not code:
-            send_flow_message(chat_id, user_id, "兑换码不能为空。", draft_input_keyboard("draft:back_usage_limit"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("兑换码不能为空", ui_field("输入类型", "<b>单个兑换码</b>")),
+                draft_input_keyboard("draft:back_usage_limit"),
+            )
             return True
         state["data"]["shared_code"] = code
         state["step"] = "confirm"
@@ -3521,7 +3589,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
     if state["step"] == "codes":
         raw_codes = [line.strip() for line in text.splitlines() if line.strip()]
         if not raw_codes:
-            send_flow_message(chat_id, user_id, "请发送兑换码，每行一个。", draft_input_keyboard("draft:edit_conditions"))
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("兑换码不能为空", ui_field("输入类型", "<b>每行一个兑换码</b>")),
+                draft_input_keyboard("draft:edit_conditions"),
+            )
             return True
         seen = set()
         codes = []
@@ -3539,7 +3612,12 @@ def handle_newbatch_v2_state(chat_id, user_id, text):
         return True
 
     if state["step"] == "confirm":
-        send_flow_message(chat_id, user_id, "请点击下方按钮确认创建，或返回修改。", confirm_keyboard())
+        send_flow_message(
+            chat_id,
+            user_id,
+            ui_notice("等待确认", "请点击下方按钮确认创建，或返回修改。"),
+            confirm_keyboard(),
+        )
         return True
 
     return False
@@ -4011,7 +4089,7 @@ def ensure_defaults_state(user_id, return_state=None):
 
 def begin_defaults_screen(chat_id, user_id, return_state=None):
     if not is_admin(user_id):
-        send_message(chat_id, "你不是管理员。")
+        send_message(chat_id, ui_error("权限不足", "你不是管理员，无法修改默认条件。"))
         return
     state = ensure_defaults_state(user_id, return_state)
     state["step"] = "menu"
@@ -4052,7 +4130,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             apply_condition_input(state, field, text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         save_default_conditions(state["data"])
         state["step"] = "menu"
@@ -4064,7 +4142,7 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             group_id = validate_group_chat_id(text)
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         if not group_id:
             state["data"]["required_group_id"] = None
@@ -4081,10 +4159,15 @@ def handle_defaults_state(chat_id, user_id, text):
         try:
             group_messages = parse_nonnegative_int(text, "群发言数")
         except ValueError as exc:
-            send_flow_message(chat_id, user_id, str(exc), defaults_input_keyboard())
+            send_flow_message(chat_id, user_id, ui_error("输入错误", ui_text(str(exc))), defaults_input_keyboard())
             return True
         if group_messages <= 0:
-            send_flow_message(chat_id, user_id, "群发言数必须大于 0。", defaults_input_keyboard())
+            send_flow_message(
+                chat_id,
+                user_id,
+                ui_error("输入错误", ui_field("发言数", "必须大于 0")),
+                defaults_input_keyboard(),
+            )
             return True
         state["data"]["required_group_messages"] = group_messages
         normalize_condition_data(state["data"])
@@ -4141,7 +4224,7 @@ def handle_defaults_callback(callback_query):
         if return_state:
             ADMIN_STATES[user_id] = return_state
             clear_flow_message(chat_id, user_id)
-            send_message(chat_id, "<b>✅ 默认条件已保存，已返回批次草稿。</b>", admin_keyboard())
+            send_message(chat_id, ui_success("默认条件已保存", "已返回批次草稿。"), admin_keyboard())
             if return_state.get("step") == "conditions":
                 show_batch_condition_screen(chat_id, user_id)
             elif return_state.get("step") == "confirm":
@@ -4149,7 +4232,7 @@ def handle_defaults_callback(callback_query):
         else:
             ADMIN_STATES.pop(user_id, None)
             clear_flow_message(chat_id, user_id)
-            send_message(chat_id, "<b>✅ 默认条件已保存。</b>", admin_keyboard())
+            send_message(chat_id, ui_success("默认条件已保存", "可继续使用下方菜单。"), admin_keyboard())
 
 
 def handle_draft_callback(callback_query):
@@ -4294,7 +4377,7 @@ def process_message(message):
 
     if text in ("取消操作", "⬅️ 取消"):
         ADMIN_STATES.pop(user_id, None)
-        send_message(chat_id, "<b>已取消当前操作。</b>", admin_keyboard())
+        send_message(chat_id, ui_success("已取消", "当前操作已结束。"), admin_keyboard())
     elif text.startswith("/start"):
         handle_start(chat_id, user, text)
     elif text.startswith("/admin"):
@@ -4306,14 +4389,14 @@ def process_message(message):
     elif text.startswith("/groups") or text in ("📊 已记录群", "已记录群"):
         show_seen_groups(chat_id, user_id)
     elif text.startswith("/botstatus") or text in ("🛡 接收状态", "接收状态"):
-        send_message(chat_id, "<b>该功能已移除。</b>", admin_keyboard())
+        send_message(chat_id, ui_notice("功能已移除", "请使用下方菜单中的现有功能。"), admin_keyboard())
     elif text.startswith("/defaults") or text == "⚙️ 默认条件":
         begin_defaults_screen(chat_id, user_id)
     elif text.startswith("/newbatch") or text in ("创建批次", "创建兑换码批次", "📦 创建批次"):
         if is_admin(user_id):
             begin_new_batch_v2(chat_id, user_id)
         else:
-            send_message(chat_id, "你不是管理员。")
+            send_message(chat_id, ui_error("权限不足", "你不是管理员，无法创建批次。"))
     elif text.startswith("/batches") or text in ("批次列表", "📋 批次列表"):
         list_batches(chat_id, user_id)
     elif text.startswith("/batch"):
@@ -4324,9 +4407,876 @@ def process_message(message):
         show_flow_v2(chat_id, user_id)
     else:
         if is_admin(user_id):
-            send_message(chat_id, "<b>请选择管理员操作。</b>", admin_keyboard())
+            send_message(chat_id, ui_notice("管理员面板", "请选择下方功能继续。"), admin_keyboard())
         else:
-            send_message(chat_id, "请通过管理员分享的专属领取链接进入。")
+            send_message(chat_id, ui_notice("领取入口", "请通过管理员分享的专属领取链接进入。"))
+
+
+def ui_field(label, value):
+    return "• <b>{0}</b>：{1}".format(label, value)
+
+
+def ui_code(value):
+    return "<code>{0}</code>".format(html.escape(str(value if value is not None else "-")))
+
+
+def ui_text(value):
+    value = str(value if value not in (None, "") else "-")
+    return html.escape(value)
+
+
+def ui_number(value):
+    return "<b>{0}</b>".format(int(value or 0))
+
+
+def ui_tip(text):
+    return "<i>{0}</i>".format(html.escape(str(text)))
+
+
+def ui_error(title, body):
+    return "<b>⚠️ {0}</b>\n\n{1}".format(html.escape(title), body)
+
+
+def ui_success(title, body):
+    return "<b>✅ {0}</b>\n\n{1}".format(html.escape(title), body)
+
+
+def ui_notice(title, body):
+    return "<b>ℹ️ {0}</b>\n\n{1}".format(html.escape(title), body)
+
+
+def batch_type_label(batch_type):
+    if batch_type == "usage":
+        return "<b>🔁 使用次数</b>"
+    if batch_type == "unique":
+        return "<b>🎁 领完为止</b>"
+    return ui_text(batch_type)
+
+
+def status_label(status):
+    if status == "active":
+        return "<b>✅ 启用中</b>"
+    if status == "disabled":
+        return "<b>⏸ 已停用</b>"
+    return ui_text(status)
+
+
+def log_status_label(status):
+    if status == "success":
+        return "<b>✅ 成功</b>"
+    if status == "failed":
+        return "<b>⚠️ 失败</b>"
+    return ui_text(status)
+
+
+def reason_label(reason):
+    labels = {
+        "link_not_found": "链接不存在",
+        "batch_disabled": "活动不可用",
+        "captcha_failed": "验证失败",
+        "group_id_invalid": "群聊配置错误",
+        "group_messages_not_enough": "群发言不足",
+        "subscription_target_invalid": "订阅配置错误",
+        "channel_not_joined": "未完成订阅",
+        "usage_limit_reached": "次数已用完",
+        "sold_out": "库存已领完",
+    }
+    return labels.get(reason or "", reason or "-")
+
+
+def stock_badge(text):
+    return "<b>{0}</b>".format(html.escape(str(text)))
+
+
+def condition_lines(batch):
+    lines = []
+    group_id = data_value(batch, "required_group_id")
+    group_messages = int(data_value(batch, "required_group_messages", 0) or 0)
+    channel_id = data_value(batch, "required_channel_id")
+    if group_id and group_messages > 0:
+        lines.append(
+            ui_field(
+                "群发言数",
+                "{0} 普通发言至少 {1}".format(target_name_html(group_id), ui_number(group_messages)),
+            )
+        )
+    if channel_id:
+        lines.append(ui_field("频道订阅", subscription_display_html(batch)))
+    if not lines:
+        lines.append(ui_field("领取条件", "<i>无额外条件</i>"))
+    return ["<b>⚙️ 领取条件</b>"] + lines
+
+
+def render_condition_lines(data):
+    group_id = data.get("required_group_id")
+    group_messages = int(data.get("required_group_messages") or 0)
+    channel_id = data.get("required_channel_id")
+    lines = []
+    if group_id and group_messages > 0:
+        lines.append(
+            ui_field(
+                "群发言数",
+                "{0} 普通发言至少 {1}".format(target_name_html(group_id), ui_number(group_messages)),
+            )
+        )
+    elif group_id:
+        lines.append(ui_field("绑定群聊", target_name_html(group_id)))
+        lines.append(ui_field("发言数量", "<i>未设置，暂不启用</i>"))
+    else:
+        lines.append(ui_field("绑定群聊", "<i>未绑定</i>"))
+        lines.append(ui_field("发言数量", "<i>未设置</i>"))
+    if channel_id:
+        lines.append(ui_field("频道订阅", subscription_display_html(data)))
+    else:
+        lines.append(ui_field("频道订阅", "<i>未启用</i>"))
+    return lines
+
+
+def render_condition_summary(data, title="领取条件"):
+    return "<b>⚙️ {0}</b>\n{1}".format(html.escape(title), "\n".join(render_condition_lines(data)))
+
+
+def settings_status_lines(data):
+    return [
+        ui_field("群聊", target_name_html(data.get("required_group_id")) if data.get("required_group_id") else "<i>未绑定</i>"),
+        ui_field("发言数", ui_number(data.get("required_group_messages")) if int(data.get("required_group_messages") or 0) > 0 else "<i>未设置</i>"),
+        ui_field("频道", subscription_display_html(data) if data.get("required_channel_id") else "<i>未绑定</i>"),
+    ]
+
+
+def render_defaults_panel(data):
+    return (
+        "<b>⚙️ 默认条件设置</b>\n\n"
+        + "\n".join(settings_status_lines(data))
+        + "\n\n"
+        "<blockquote>这些值只会带入新批次；已创建批次不会被修改。</blockquote>"
+    )
+
+
+def render_defaults_summary(data):
+    return (
+        "<b>⚙️ 默认领取条件</b>\n\n"
+        + "\n".join(render_condition_lines(data))
+        + "\n\n"
+        "<blockquote>创建新批次时会自动载入这些条件。</blockquote>"
+    )
+
+
+def render_batch_summary(data):
+    lines = [
+        "<b>📦 批次预览</b>",
+        "",
+        ui_field("名称", "<b>{0}</b>".format(ui_text(data.get("name")))),
+        ui_field("类型", batch_type_label(data.get("batch_type"))),
+    ]
+    if data.get("batch_type") == "usage":
+        lines.append(ui_field("可领取次数", ui_number(data.get("usage_limit"))))
+        if data.get("shared_code"):
+            lines.append(ui_field("兑换码", ui_code(data.get("shared_code"))))
+    else:
+        codes = data.get("codes") or []
+        lines.append(ui_field("导入数量", ui_number(len(codes))))
+        lines.append(ui_field("重复跳过", ui_number(data.get("duplicated"))))
+    lines.extend(["", render_condition_summary(data)])
+    return "\n".join(lines)
+
+
+def batch_stock_text(conn, batch):
+    if batch["batch_type"] == "usage":
+        used = batch["usage_count"] or 0
+        total = batch["usage_limit"] or 0
+        remaining = max(total - used, 0)
+        return "已领 {0}/{1}，剩余 {2}".format(used, total, remaining)
+    stock_row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) AS available,
+            SUM(CASE WHEN status = 'claimed' THEN 1 ELSE 0 END) AS claimed,
+            COUNT(*) AS total
+        FROM batch_codes
+        WHERE batch_id = ?
+        """,
+        (batch["id"],),
+    ).fetchone()
+    available = stock_row["available"] or 0
+    claimed = stock_row["claimed"] or 0
+    total = stock_row["total"] or 0
+    return "已领 {0}/{1}，剩余 {2}".format(claimed, total, available)
+
+
+def show_admin_panel_v2(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, ui_error("权限不足", "你不是管理员，无法使用管理功能。"))
+        return
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>🛠 管理员面板</b>\n\n"
+        "<b>当前能力</b>\n"
+        + ui_field("批次创建", "按钮配置、最终确认、自动生成链接") + "\n"
+        + ui_field("领取条件", "群发言数、频道订阅、默认条件") + "\n"
+        + ui_field("发码流程", "验证、校验、扣库存、记录日志") + "\n\n"
+        "<i>请选择下方功能开始操作。</i>",
+        admin_keyboard(),
+    )
+
+
+def show_flow_v2(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
+        return
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>🧭 核心流程</b>\n\n"
+        "<b>管理员</b>\n"
+        "1. 创建批次\n"
+        "2. 配置领取条件\n"
+        "3. 导入兑换码\n"
+        "4. 分享专属链接\n\n"
+        "<b>用户</b>\n"
+        "5. 点击领取链接\n"
+        "6. 完成人机验证\n"
+        "7. 系统校验群发言数 / 频道订阅\n"
+        "8. 自动发放兑换码\n\n"
+        "<blockquote>普通用户没有领取菜单，只能通过专属链接领取。</blockquote>",
+        admin_keyboard(),
+    )
+
+
+def list_batches(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
+        return
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, token, name, batch_type, usage_limit, usage_count, status, created_at
+            FROM batches
+            ORDER BY id DESC
+            LIMIT 10
+            """
+        ).fetchall()
+        stock_map = {}
+        for row in rows:
+            if row["batch_type"] == "usage":
+                stock_map[row["id"]] = "已领 {0}/{1}".format(row["usage_count"] or 0, row["usage_limit"] or 0)
+            else:
+                stock_row = conn.execute(
+                    """
+                    SELECT
+                        SUM(CASE WHEN status = 'available' THEN 1 ELSE 0 END) AS available,
+                        COUNT(*) AS total
+                    FROM batch_codes
+                    WHERE batch_id = ?
+                    """,
+                    (row["id"],),
+                ).fetchone()
+                stock_map[row["id"]] = "剩余 {0}/{1}".format(stock_row["available"] or 0, stock_row["total"] or 0)
+    if not rows:
+        send_message(chat_id, "<b>📋 批次列表</b>\n\n<i>暂无批次。</i>", admin_keyboard())
+        return
+    lines = ["<b>📋 最近批次</b>"]
+    for row in rows:
+        lines.append(
+            "\n<b>#{0}｜{1}</b>\n"
+            "<blockquote>"
+            "{2}\n{3}\n{4}\n{5}"
+            "</blockquote>".format(
+                row["id"],
+                ui_text(row["name"]),
+                ui_field("类型", batch_type_label(row["batch_type"])),
+                ui_field("状态", status_label(row["status"])),
+                ui_field("库存", stock_badge(stock_map[row["id"]])),
+                ui_field("链接", ui_code(create_batch_link(row["token"]))),
+            )
+        )
+    lines.append("\n<i>查看详情：发送 <code>/batch 1</code></i>")
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def show_batch_detail(chat_id, user_id, text):
+    if not is_admin(user_id):
+        send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
+        return
+    parts = text.split()
+    if len(parts) < 2:
+        send_message(chat_id, ui_error("参数缺失", "请发送：<code>/batch 批次编号</code>"))
+        return
+    try:
+        batch_id = int(parts[1])
+    except ValueError:
+        send_message(chat_id, ui_error("格式错误", "批次编号必须是数字。"))
+        return
+    with db_connect() as conn:
+        batch = conn.execute("SELECT * FROM batches WHERE id = ?", (batch_id,)).fetchone()
+        if not batch:
+            send_message(chat_id, ui_error("未找到批次", "没有找到这个批次。"))
+            return
+        success_count = conn.execute(
+            "SELECT COUNT(*) AS total FROM claim_logs WHERE batch_id = ? AND status = 'success'",
+            (batch["id"],),
+        ).fetchone()["total"]
+        failed_count = conn.execute(
+            "SELECT COUNT(*) AS total FROM claim_logs WHERE batch_id = ? AND status = 'failed'",
+            (batch["id"],),
+        ).fetchone()["total"]
+        stock = batch_stock_text(conn, batch)
+    lines = [
+        "<b>📦 批次详情</b>",
+        "",
+        ui_field("编号", ui_code("#{0}".format(batch["id"]))),
+        ui_field("名称", "<b>{0}</b>".format(ui_text(batch["name"]))),
+        ui_field("类型", batch_type_label(batch["batch_type"])),
+        ui_field("状态", status_label(batch["status"])),
+        ui_field("库存", stock_badge(stock)),
+        "",
+        "\n".join(condition_lines(batch)),
+        "",
+        "<b>📊 领取统计</b>",
+        ui_field("成功领取", ui_number(success_count)),
+        ui_field("失败记录", ui_number(failed_count)),
+        ui_field("创建时间", ui_code(batch["created_at"])),
+        "",
+        "<b>🔗 专属领取链接</b>",
+        ui_code(create_batch_link(batch["token"])),
+    ]
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def show_records(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
+        return
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT telegram_id, username, batch_token, code, status, captcha_passed, reason, created_at
+            FROM claim_logs
+            ORDER BY id DESC
+            LIMIT 15
+            """
+        ).fetchall()
+    if not rows:
+        send_message(chat_id, "<b>🗒 最近领取记录</b>\n\n<i>暂无领取记录。</i>", admin_keyboard())
+        return
+    lines = ["<b>🗒 最近领取记录</b>"]
+    for row in rows:
+        username = "@{0}".format(row["username"]) if row["username"] else "-"
+        result = row["code"] if row["status"] == "success" else reason_label(row["reason"])
+        lines.append(
+            "\n<b>{0}</b>\n"
+            "<blockquote>"
+            "{1}\n{2}\n{3}\n{4}"
+            "</blockquote>".format(
+                html.escape(row["created_at"] or "-"),
+                ui_field("状态", log_status_label(row["status"])),
+                ui_field("用户", "{0} {1}".format(ui_code(row["telegram_id"]), ui_text(username))),
+                ui_field("批次", ui_code(row["batch_token"])),
+                ui_field("结果", ui_code(result)),
+            )
+        )
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def show_seen_groups(chat_id, user_id):
+    if not is_admin(user_id):
+        send_message(chat_id, ui_error("权限不足", "你不是管理员。"))
+        return
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                c.chat_id,
+                c.title,
+                c.username,
+                c.chat_type,
+                c.last_seen_at,
+                COUNT(s.telegram_id) AS user_count,
+                COALESCE(SUM(s.message_count), 0) AS message_count
+            FROM chat_infos c
+            LEFT JOIN user_chat_stats s ON s.chat_id = c.chat_id
+            GROUP BY c.chat_id, c.title, c.username, c.chat_type, c.last_seen_at
+            ORDER BY c.last_seen_at DESC
+            LIMIT 20
+            """
+        ).fetchall()
+    if not rows:
+        send_message(
+            chat_id,
+            "<b>📊 已记录群</b>\n\n"
+            "<i>暂时没有记录到群消息。</i>\n\n"
+            "<blockquote>请把 Bot 加入目标群，并确认 BotFather 的 Privacy Mode 已关闭。</blockquote>",
+            admin_keyboard(),
+        )
+        return
+    lines = [
+        "<b>📊 已记录群</b>",
+        "<i>绑定群发言条件时，可直接使用这里的 Chat ID。</i>",
+    ]
+    for index, row in enumerate(rows, 1):
+        username = "@{0}".format(row["username"]) if row["username"] else "-"
+        lines.append(
+            "\n<b>{0}. {1}</b>\n"
+            "<blockquote>"
+            "{2}\n{3}\n{4}\n{5}\n{6}\n{7}"
+            "</blockquote>".format(
+                index,
+                ui_text(row["title"] or row["chat_id"]),
+                ui_field("Chat ID", ui_code(row["chat_id"])),
+                ui_field("类型", ui_text(row["chat_type"])),
+                ui_field("统计用户", "{0} 人".format(ui_number(row["user_count"]))),
+                ui_field("累计发言", "{0} 条".format(ui_number(row["message_count"]))),
+                ui_field("用户名", ui_text(username)),
+                ui_field("最近记录", ui_code(row["last_seen_at"] or "-")),
+            )
+        )
+    send_message(chat_id, "\n".join(lines), admin_keyboard())
+
+
+def show_batch_condition_screen(chat_id, user_id, message_id=None):
+    state = ADMIN_STATES.get(user_id)
+    if not state:
+        send_message(chat_id, ui_error("流程已失效", "请重新开始创建批次。"), admin_keyboard())
+        return
+    text = (
+        "<b>⚙️ 创建批次</b>\n"
+        "<b>第 3 步 / 共 5 步：领取条件</b>\n\n"
+        + "\n".join(render_condition_lines(state["data"]))
+        + "\n\n"
+        "<blockquote>群发言条件和频道订阅条件可以同时启用。</blockquote>"
+    )
+    if message_id:
+        result = safe_edit_message_text(chat_id, message_id, text, condition_edit_keyboard())
+        if result:
+            CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        else:
+            send_flow_message(chat_id, user_id, text, condition_edit_keyboard())
+    else:
+        send_flow_message(chat_id, user_id, text, condition_edit_keyboard())
+
+
+def show_batch_preview(chat_id, user_id, message_id=None):
+    state = ADMIN_STATES.get(user_id)
+    if not state:
+        send_message(chat_id, ui_error("流程已失效", "请重新开始创建批次。"), admin_keyboard())
+        return
+    text = (
+        render_batch_summary(state["data"])
+        + "\n\n"
+        "<b>✅ 请确认配置</b>\n"
+        "<i>确认后会写入库存，并生成专属领取链接。</i>"
+    )
+    if message_id:
+        result = safe_edit_message_text(chat_id, message_id, text, confirm_keyboard())
+        if result:
+            CLEANUP_MESSAGES[cleanup_key(chat_id, user_id)] = message_id
+        else:
+            send_flow_message(chat_id, user_id, text, confirm_keyboard())
+    else:
+        send_flow_message(chat_id, user_id, text, confirm_keyboard())
+
+
+def ask_condition_value(chat_id, field):
+    if field == "required_channel_id":
+        return (
+            "<b>📢 绑定频道订阅</b>\n\n"
+            "<b>操作方式</b>\n"
+            "请从目标频道转发任意一条消息到这里。\n\n"
+            "<blockquote>绑定后会自动检测 Bot 是否在频道内；如果检测不到，请把 Bot 拉进频道并给必要权限。</blockquote>\n\n"
+            "<i>发送 <code>0</code> 可关闭频道订阅条件。</i>"
+        )
+    return "<b>请输入内容</b>"
+
+
+def ask_group_chat_prompt():
+    return (
+        "<b>💬 手动绑定群聊</b>\n\n"
+        "<b>需要输入</b>\n"
+        "目标群聊的数字 Chat ID。\n\n"
+        "<blockquote>群聊 ID 通常是 <code>-100...</code>，个人 User ID 不能用于这里。</blockquote>"
+    )
+
+
+def ask_group_messages_prompt(group_id):
+    return (
+        "<b>🔢 设置发言数量</b>\n\n"
+        + ui_field("当前群聊", target_name_html(group_id)) + "\n"
+        + ui_field("输入类型", "<b>正整数</b>") + "\n\n"
+        "<i>示例：<code>5</code></i>"
+    )
+
+
+def send_batch_type_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>📦 创建批次</b>\n"
+        "<b>第 2 步 / 共 5 步：选择类型</b>\n\n"
+        + ui_field("使用次数", "一个兑换码，可被多人领取到次数上限") + "\n"
+        + ui_field("领完为止", "多个兑换码，每个兑换码只发放一次"),
+        batch_type_keyboard(),
+    )
+
+
+def send_usage_limit_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>📦 创建批次</b>\n"
+        "<b>第 4 步 / 共 5 步：可领取次数</b>\n\n"
+        + ui_field("输入类型", "<b>正整数</b>") + "\n"
+        + ui_field("示例", ui_code("100")),
+        draft_input_keyboard("draft:edit_conditions"),
+    )
+
+
+def send_usage_code_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>📦 创建批次</b>\n"
+        "<b>第 5 步 / 共 5 步：兑换码</b>\n\n"
+        + ui_field("输入类型", "<b>单个兑换码</b>") + "\n"
+        + ui_field("示例", ui_code("ABC-DEF-001")),
+        draft_input_keyboard("draft:back_usage_limit"),
+    )
+
+
+def send_unique_codes_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>📦 创建批次</b>\n"
+        "<b>第 4 步 / 共 5 步：批量导入</b>\n\n"
+        + ui_field("输入类型", "<b>每行一个兑换码</b>") + "\n"
+        + ui_field("示例", "<code>CODE001\nCODE002\nCODE003</code>"),
+        draft_input_keyboard("draft:edit_conditions"),
+    )
+
+
+def begin_new_batch_v2(chat_id, user_id):
+    with db_connect() as conn:
+        defaults = load_default_conditions(conn)
+    ADMIN_STATES[user_id] = {
+        "action": "newbatch_v2",
+        "step": "name",
+        "data": defaults,
+    }
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>📦 创建批次</b>\n"
+        "<b>第 1 步 / 共 5 步：批次名称</b>\n\n"
+        + ui_field("输入类型", "<b>文本名称</b>") + "\n"
+        + ui_field("示例", "<i>7 月新用户福利</i>") + "\n\n"
+        "<b>已载入默认条件</b>\n"
+        + "\n".join(render_condition_lines(defaults)),
+        draft_exit_keyboard(),
+    )
+
+
+def create_batch_from_draft(chat_id, user_id):
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "newbatch_v2":
+        return
+    data = state["data"]
+    normalize_batch_draft(state)
+    token = "batch_" + uuid.uuid4().hex[:16]
+    current = now_text()
+    with db_connect() as conn:
+        if data["batch_type"] == "usage":
+            conn.execute(
+                """
+                INSERT INTO batches
+                    (
+                        token, name, batch_type, shared_code, usage_limit, usage_count,
+                        required_group_id, required_group_messages, required_channel_id, required_channel_link,
+                        created_by, created_at
+                    )
+                VALUES (?, ?, 'usage', ?, ?, 0, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    data["name"],
+                    data["shared_code"],
+                    int(data["usage_limit"]),
+                    data.get("required_group_id"),
+                    int(data.get("required_group_messages") or 0),
+                    data.get("required_channel_id"),
+                    data.get("required_channel_link"),
+                    user_id,
+                    current,
+                ),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                INSERT INTO batches
+                    (
+                        token, name, batch_type,
+                        required_group_id, required_group_messages, required_channel_id, required_channel_link,
+                        created_by, created_at
+                    )
+                VALUES (?, ?, 'unique', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    data["name"],
+                    data.get("required_group_id"),
+                    int(data.get("required_group_messages") or 0),
+                    data.get("required_channel_id"),
+                    data.get("required_channel_link"),
+                    user_id,
+                    current,
+                ),
+            )
+            batch_id = cursor.lastrowid
+            for code in data.get("codes") or []:
+                conn.execute(
+                    "INSERT INTO batch_codes (batch_id, code, created_at) VALUES (?, ?, ?)",
+                    (batch_id, code, current),
+                )
+    ADMIN_STATES.pop(user_id, None)
+    clear_flow_message(chat_id, user_id)
+    send_message(
+        chat_id,
+        render_batch_summary(data)
+        + "\n\n"
+        "<b>✅ 创建成功</b>\n"
+        + ui_field("领取链接", ui_code(create_batch_link(token))) + "\n\n"
+        "<i>复制链接后可发送到频道、群聊或私聊。</i>",
+        admin_keyboard(),
+    )
+
+
+def check_claim_conditions(conn, user, batch):
+    group_id = batch["required_group_id"]
+    group_messages = batch["required_group_messages"] or 0
+    if group_id and group_messages > 0:
+        if str(group_id).isdigit():
+            return (
+                False,
+                "group_id_invalid",
+                ui_error(
+                    "领取失败",
+                    "当前批次的群发言条件配置错误。\n\n"
+                    + ui_field("错误 ID", ui_code(group_id)) + "\n"
+                    + ui_field("处理方式", "请管理员使用负数群聊 Chat ID 重新配置。"),
+                ),
+            )
+        row = conn.execute(
+            "SELECT message_count FROM user_chat_stats WHERE telegram_id = ? AND chat_id = ?",
+            (user["id"], str(group_id)),
+        ).fetchone()
+        message_count = row["message_count"] if row else 0
+        if message_count < group_messages:
+            info = conn.execute("SELECT title FROM chat_infos WHERE chat_id = ?", (str(group_id),)).fetchone()
+            group_title = info["title"] if info and info["title"] else str(group_id)
+            return (
+                False,
+                "group_messages_not_enough",
+                ui_error(
+                    "领取失败",
+                    ui_field("目标群聊", "<b>{0}</b>".format(ui_text(group_title))) + "\n"
+                    + ui_field("当前发言", ui_number(message_count)) + "\n"
+                    + ui_field("最低要求", ui_number(group_messages)),
+                ),
+            )
+
+    channel_id = batch["required_channel_id"]
+    if channel_id:
+        if is_invite_link(str(channel_id)):
+            return (
+                False,
+                "subscription_target_invalid",
+                ui_error("领取失败", "当前频道订阅条件需要管理员重新配置。"),
+            )
+        member = get_chat_member(channel_id, user["id"])
+        if not member_is_joined(member):
+            channel_link = data_value(batch, "required_channel_link") or default_subscription_link(channel_id)
+            open_text = "\n" + ui_field("订阅入口", subscription_display_html(batch)) if channel_link else ""
+            return (
+                False,
+                "channel_not_joined",
+                ui_error("领取失败", "请先完成频道订阅，然后重新打开领取链接。{0}".format(open_text)),
+            )
+
+    return True, None, None
+
+
+def claim_success_message(code):
+    return ui_success(
+        "领取成功",
+        ui_field("兑换码", ui_code(code)) + "\n\n<i>领取记录已保存。</i>",
+    )
+
+
+def issue_code_v2(chat_id, user, batch_token):
+    response_text = None
+
+    with db_connect() as conn:
+        upsert_user(conn, user)
+
+    with db_connect() as conn:
+        batch = find_batch(conn, batch_token)
+        if not batch:
+            response_text = ui_error("领取失败", "领取链接不存在或已失效。")
+        elif batch["status"] != "active":
+            log_claim(conn, user, batch, None, "failed", 1, "batch_disabled")
+            response_text = ui_error("领取失败", "当前活动未开始、已结束或已失效。")
+        else:
+            previous = conn.execute(
+                "SELECT code FROM claim_logs WHERE batch_id = ? AND telegram_id = ? AND status = 'success' ORDER BY id DESC LIMIT 1",
+                (batch["id"], user["id"]),
+            ).fetchone()
+            if previous:
+                response_text = ui_success("你已经领取过这个批次", ui_field("兑换码", ui_code(previous["code"] or "")))
+            else:
+                conditions_ok, reason, message = check_claim_conditions(conn, user, batch)
+                if not conditions_ok:
+                    log_claim(conn, user, batch, None, "failed", 1, reason)
+                    response_text = message
+
+    if response_text:
+        send_message(chat_id, response_text)
+        return
+
+    conn = db_connect()
+    transaction_started = False
+    try:
+        conn.isolation_level = None
+        conn.execute("BEGIN IMMEDIATE")
+        transaction_started = True
+        upsert_user(conn, user)
+        batch = find_batch(conn, batch_token)
+        if not batch:
+            conn.execute("COMMIT")
+            transaction_started = False
+            response_text = ui_error("领取失败", "领取链接不存在或已失效。")
+        elif batch["status"] != "active":
+            log_claim(conn, user, batch, None, "failed", 1, "batch_disabled")
+            conn.execute("COMMIT")
+            transaction_started = False
+            response_text = ui_error("领取失败", "当前活动未开始、已结束或已失效。")
+        else:
+            previous = conn.execute(
+                "SELECT code FROM claim_logs WHERE batch_id = ? AND telegram_id = ? AND status = 'success' ORDER BY id DESC LIMIT 1",
+                (batch["id"], user["id"]),
+            ).fetchone()
+            if previous:
+                conn.execute("COMMIT")
+                transaction_started = False
+                response_text = ui_success("你已经领取过这个批次", ui_field("兑换码", ui_code(previous["code"] or "")))
+            elif batch["batch_type"] == "usage":
+                if batch["usage_count"] >= batch["usage_limit"]:
+                    log_claim(conn, user, batch, None, "failed", 1, "usage_limit_reached")
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = ui_error("领取失败", "当前兑换码已达到使用次数上限。")
+                else:
+                    conn.execute("UPDATE batches SET usage_count = usage_count + 1 WHERE id = ?", (batch["id"],))
+                    code = batch["shared_code"]
+                    log_claim(conn, user, batch, code, "success", 1, None)
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = claim_success_message(code or "")
+            else:
+                code_row = conn.execute(
+                    "SELECT id, code FROM batch_codes WHERE batch_id = ? AND status = 'available' ORDER BY id ASC LIMIT 1",
+                    (batch["id"],),
+                ).fetchone()
+                if not code_row:
+                    log_claim(conn, user, batch, None, "failed", 1, "sold_out")
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = ui_error("领取失败", "当前兑换码已领完。")
+                else:
+                    conn.execute(
+                        "UPDATE batch_codes SET status = 'claimed', claimed_by = ?, claimed_at = ? WHERE id = ? AND status = 'available'",
+                        (user["id"], now_text(), code_row["id"]),
+                    )
+                    log_claim(conn, user, batch, code_row["code"], "success", 1, None)
+                    conn.execute("COMMIT")
+                    transaction_started = False
+                    response_text = claim_success_message(code_row["code"] or "")
+    except Exception:
+        if transaction_started:
+            conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.close()
+
+    if response_text:
+        send_message(chat_id, response_text)
+
+
+def handle_start(chat_id, user, text):
+    parts = text.split(None, 1)
+    if len(parts) < 2:
+        send_message(chat_id, ui_notice("领取入口", "请通过管理员分享的专属领取链接进入。"))
+        return
+    token = parts[1].strip()
+    with db_connect() as conn:
+        upsert_user(conn, user)
+        batch = find_batch(conn, token)
+        if not batch:
+            log_claim(conn, user, None, None, "failed", 0, "link_not_found")
+            send_message(chat_id, ui_error("领取失败", "领取链接不存在或已失效。"))
+            return
+        if batch["status"] != "active":
+            log_claim(conn, user, batch, None, "failed", 0, "batch_disabled")
+            send_message(chat_id, ui_error("领取失败", "当前活动未开始、已结束或已失效。"))
+            return
+        previous = conn.execute(
+            "SELECT code FROM claim_logs WHERE batch_id = ? AND telegram_id = ? AND status = 'success' ORDER BY id DESC LIMIT 1",
+            (batch["id"], user["id"]),
+        ).fetchone()
+        if previous:
+            send_message(chat_id, ui_success("你已经领取过这个批次", ui_field("兑换码", ui_code(previous["code"] or ""))))
+            return
+
+    verify_token = uuid.uuid4().hex[:16]
+    target, answer_key, choices = make_captcha()
+    VERIFY_STATES[user["id"]] = {
+        "token": verify_token,
+        "batch_token": token,
+        "answer_key": answer_key,
+        "expires_at": time.time() + CAPTCHA_TTL_SECONDS,
+    }
+    send_flow_message(
+        chat_id,
+        user["id"],
+        "<b>🎁 准备领取</b>\n\n"
+        + ui_field("批次", "<b>{0}</b>".format(ui_text(batch["name"]))) + "\n\n"
+        + "\n".join(condition_lines(batch)) + "\n\n"
+        "<b>🛡 人机验证</b>\n"
+        + ui_field("点击目标", "<b>{0}</b>".format(html.escape(target))) + "\n"
+        + ui_field("有效时间", "<b>2 分钟</b>"),
+        verify_keyboard(verify_token, choices),
+    )
+
+
+def handle_whoami(chat_id, user):
+    username = "@{0}".format(user.get("username")) if user.get("username") else "-"
+    send_message(
+        chat_id,
+        "<b>👤 我的 Telegram 信息</b>\n\n"
+        + ui_field("User ID", ui_code(user["id"])) + "\n"
+        + ui_field("用户名", ui_text(username)),
+    )
+
+
+def handle_chatid(chat_id, message):
+    chat = message.get("chat") or {}
+    title = chat.get("title") or chat.get("username") or "当前会话"
+    send_message(
+        chat_id,
+        "<b>💬 会话信息</b>\n\n"
+        + ui_field("名称", "<b>{0}</b>".format(ui_text(title))) + "\n"
+        + ui_field("Chat ID", ui_code(chat_id)) + "\n\n"
+        "<i>Bot 只在私聊响应；群聊内仅静默统计普通发言。</i>",
+    )
 
 
 def configure_bot_menu():
