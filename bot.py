@@ -777,6 +777,85 @@ def confirm_keyboard():
     }
 
 
+def admin_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "📦 创建批次"}, {"text": "📋 批次列表"}, {"text": "🗒 最近记录"}],
+            [{"text": "⚙️ 默认条件"}, {"text": "🧩 核心流程"}, {"text": "📊 已记录群"}],
+            [{"text": "🛡 接收状态"}, {"text": "⬅️ 取消"}, {"text": "👤 我的ID"}],
+        ],
+        "resize_keyboard": True,
+        "is_persistent": True,
+    }
+
+
+def batch_type_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔁 使用次数", "callback_data": "draft:type_usage"},
+                {"text": "🎁 领完为止", "callback_data": "draft:type_unique"},
+            ],
+            [{"text": "❌ 退出创建", "callback_data": "draft:cancel"}],
+        ]
+    }
+
+
+def draft_exit_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "❌ 退出创建", "callback_data": "draft:cancel"}],
+        ]
+    }
+
+
+def draft_input_keyboard(back_data=None):
+    rows = []
+    if back_data:
+        rows.append([{"text": "⬅️ 返回上一步", "callback_data": back_data}])
+    rows.append([{"text": "❌ 退出创建", "callback_data": "draft:cancel"}])
+    return {"inline_keyboard": rows}
+
+
+def condition_edit_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "💬 群发言条件", "callback_data": "draft:group_condition"},
+                {"text": "📣 频道订阅", "callback_data": "draft:channel_id"},
+            ],
+            [
+                {"text": "📥 载入默认", "callback_data": "draft:load_defaults"},
+                {"text": "🧹 清空条件", "callback_data": "draft:clear_conditions"},
+            ],
+            [
+                {"text": "✅ 继续", "callback_data": "draft:continue"},
+                {"text": "⚙️ 默认值", "callback_data": "draft:open_defaults"},
+            ],
+            [
+                {"text": "⬅️ 返回类型", "callback_data": "draft:back_type"},
+                {"text": "❌ 退出创建", "callback_data": "draft:cancel"},
+            ],
+        ]
+    }
+
+
+def confirm_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "✅ 确认创建", "callback_data": "draft:confirm"},
+                {"text": "✏️ 修改条件", "callback_data": "draft:edit_conditions"},
+            ],
+            [
+                {"text": "✏️ 修改兑换码", "callback_data": "draft:edit_codes"},
+                {"text": "⬅️ 返回类型", "callback_data": "draft:edit_type"},
+            ],
+            [{"text": "❌ 退出创建", "callback_data": "draft:cancel"}],
+        ]
+    }
+
+
 def make_captcha():
     symbols = ["◆", "◇", "●", "○", "▲", "△", "■", "□", "★", "☆", "✚", "✦"]
     labels = random.sample(symbols, 9)
@@ -2363,6 +2442,269 @@ def handle_defaults_callback(callback_query):
             ADMIN_STATES.pop(user_id, None)
             clear_flow_message(chat_id, user_id)
             send_message(chat_id, "<b>✅ 默认值已保存。</b>", admin_keyboard())
+def cancel_new_batch(chat_id, user_id):
+    ADMIN_STATES.pop(user_id, None)
+    clear_flow_message(chat_id, user_id)
+    send_message(chat_id, "<b>已退出创建批次。</b>", admin_keyboard())
+
+
+def send_batch_type_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>🔁 第 2 步 / 共 5 步</b>\n\n请选择批次类型。",
+        batch_type_keyboard(),
+    )
+
+
+def send_usage_limit_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>🧾 第 4 步 / 共 5 步</b>\n\n请输入这个兑换码可被领取的次数。\n\n<i>示例：</i> <code>100</code>",
+        draft_input_keyboard("draft:edit_conditions"),
+    )
+
+
+def send_usage_code_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>🧾 第 5 步 / 共 5 步</b>\n\n请输入这一个兑换码。\n\n<i>示例：</i> <code>ABC-DEF-001</code>",
+        draft_input_keyboard("draft:back_usage_limit"),
+    )
+
+
+def send_unique_codes_prompt(chat_id, user_id):
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>🎁 第 4 步 / 共 5 步</b>\n\n请批量发送兑换码，每行一个。\n\n<i>示例：</i>\n<code>CODE001</code>\n<code>CODE002</code>\n<code>CODE003</code>",
+        draft_input_keyboard("draft:edit_conditions"),
+    )
+
+
+def begin_new_batch_v2(chat_id, user_id):
+    with db_connect() as conn:
+        defaults = load_default_conditions(conn)
+    ADMIN_STATES[user_id] = {
+        "action": "newbatch_v2",
+        "step": "name",
+        "data": defaults,
+    }
+    send_flow_message(
+        chat_id,
+        user_id,
+        "<b>📦 创建批次</b>\n"
+        "<b>第 1 步 / 共 5 步</b>\n\n"
+        "请输入批次名称。\n\n"
+        "<b>已载入默认条件</b>\n"
+        + "\n".join(render_condition_lines(defaults))
+        + "\n\n"
+        "<i>示例：7 月新用户福利、频道活动兑换码、测试批次。</i>",
+        draft_exit_keyboard(),
+    )
+
+
+def handle_newbatch_v2_state(chat_id, user_id, text):
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "newbatch_v2":
+        return False
+
+    if text in ("⬅️ 取消", "❌ 退出创建", "退出创建", "取消操作", "取消"):
+        cancel_new_batch(chat_id, user_id)
+        return True
+
+    if state["step"] == "name":
+        if not text:
+            send_flow_message(chat_id, user_id, "批次名称不能为空。", draft_exit_keyboard())
+            return True
+        state["data"]["name"] = text
+        state["step"] = "type"
+        send_batch_type_prompt(chat_id, user_id)
+        return True
+
+    if state["step"] == "type":
+        if text in ("🔁 使用次数", "使用次数", "usage"):
+            state["data"]["batch_type"] = "usage"
+        elif text in ("🎁 领完为止", "领完为止", "unique"):
+            state["data"]["batch_type"] = "unique"
+        else:
+            send_flow_message(chat_id, user_id, "请点击下方按钮选择批次类型。", batch_type_keyboard())
+            return True
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id)
+        return True
+
+    if state["step"] == "condition_input":
+        field = state.get("pending_field")
+        try:
+            apply_condition_input(state, field, text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            return True
+        state["step"] = "conditions"
+        state["pending_field"] = None
+        show_batch_condition_screen(chat_id, user_id)
+        return True
+
+    if state["step"] == "group_condition_id":
+        try:
+            group_id = validate_group_chat_id(text)
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            return True
+        if not group_id:
+            state["data"]["required_group_id"] = None
+            state["data"]["required_group_messages"] = 0
+            state["step"] = "conditions"
+            state["pending_group_id"] = None
+            show_batch_condition_screen(chat_id, user_id)
+            return True
+        state["pending_group_id"] = group_id
+        state["step"] = "group_condition_messages"
+        send_flow_message(chat_id, user_id, ask_group_condition_messages(group_id), draft_input_keyboard("draft:group_condition"))
+        return True
+
+    if state["step"] == "group_condition_messages":
+        try:
+            group_messages = parse_nonnegative_int(text, "群发言数")
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:group_condition"))
+            return True
+        if group_messages <= 0:
+            send_flow_message(chat_id, user_id, "群发言数必须大于 0；如需关闭条件，请重新点击群发言条件并输入 0。", draft_input_keyboard("draft:group_condition"))
+            return True
+        state["data"]["required_group_id"] = state.get("pending_group_id")
+        state["data"]["required_group_messages"] = group_messages
+        state["pending_group_id"] = None
+        state["step"] = "conditions"
+        normalize_condition_data(state["data"])
+        show_batch_condition_screen(chat_id, user_id)
+        return True
+
+    if state["step"] == "usage_limit":
+        try:
+            usage_limit = parse_nonnegative_int(text, "可用次数")
+        except ValueError as exc:
+            send_flow_message(chat_id, user_id, str(exc), draft_input_keyboard("draft:edit_conditions"))
+            return True
+        if usage_limit <= 0:
+            send_flow_message(chat_id, user_id, "可用次数必须大于 0。", draft_input_keyboard("draft:edit_conditions"))
+            return True
+        state["data"]["usage_limit"] = usage_limit
+        state["step"] = "usage_code"
+        send_usage_code_prompt(chat_id, user_id)
+        return True
+
+    if state["step"] == "usage_code":
+        code = text.strip()
+        if not code:
+            send_flow_message(chat_id, user_id, "兑换码不能为空。", draft_input_keyboard("draft:back_usage_limit"))
+            return True
+        state["data"]["shared_code"] = code
+        state["step"] = "confirm"
+        show_batch_preview(chat_id, user_id)
+        return True
+
+    if state["step"] == "codes":
+        raw_codes = [line.strip() for line in text.splitlines() if line.strip()]
+        if not raw_codes:
+            send_flow_message(chat_id, user_id, "请发送兑换码，每行一个。", draft_input_keyboard("draft:edit_conditions"))
+            return True
+        seen = set()
+        codes = []
+        duplicated = 0
+        for code in raw_codes:
+            if code in seen:
+                duplicated += 1
+                continue
+            seen.add(code)
+            codes.append(code)
+        state["data"]["codes"] = codes
+        state["data"]["duplicated"] = duplicated
+        state["step"] = "confirm"
+        show_batch_preview(chat_id, user_id)
+        return True
+
+    if state["step"] == "confirm":
+        send_flow_message(chat_id, user_id, "请点击下方按钮确认创建，或返回修改。", confirm_keyboard())
+        return True
+
+    return False
+
+
+def handle_draft_callback(callback_query):
+    user = callback_query.get("from") or {}
+    message = callback_query.get("message") or {}
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    user_id = user.get("id")
+    data = (callback_query.get("data") or "").split(":", 1)[1]
+    state = ADMIN_STATES.get(user_id)
+    if not state or state.get("action") != "newbatch_v2":
+        answer_callback_query(callback_query.get("id"), "请先重新开始创建批次。", show_alert=True)
+        return
+
+    answer_callback_query(callback_query.get("id"))
+    if data == "cancel":
+        cancel_new_batch(chat_id, user_id)
+    elif data == "type_usage":
+        state["data"]["batch_type"] = "usage"
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "type_unique":
+        state["data"]["batch_type"] = "unique"
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "group_condition":
+        state["step"] = "group_condition_id"
+        state["pending_group_id"] = None
+        send_flow_message(chat_id, user_id, ask_group_condition_id(), draft_input_keyboard("draft:edit_conditions"))
+    elif data == "channel_id":
+        state["step"] = "condition_input"
+        state["pending_field"] = "required_channel_id"
+        send_flow_message(chat_id, user_id, ask_condition_value(chat_id, "required_channel_id"), draft_input_keyboard("draft:edit_conditions"))
+    elif data == "load_defaults":
+        with db_connect() as conn:
+            state["data"].update(load_default_conditions(conn))
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "clear_conditions":
+        state["data"]["required_group_id"] = None
+        state["data"]["required_group_messages"] = 0
+        state["data"]["required_channel_id"] = None
+        state["data"]["required_channel_link"] = None
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "continue":
+        if state["data"]["batch_type"] == "usage":
+            state["step"] = "usage_limit"
+            send_usage_limit_prompt(chat_id, user_id)
+        else:
+            state["step"] = "codes"
+            send_unique_codes_prompt(chat_id, user_id)
+    elif data == "back_type" or data == "edit_type":
+        state["step"] = "type"
+        send_batch_type_prompt(chat_id, user_id)
+    elif data == "open_defaults":
+        begin_defaults_screen(chat_id, user_id, state)
+    elif data == "edit_conditions":
+        state["step"] = "conditions"
+        show_batch_condition_screen(chat_id, user_id, message_id)
+    elif data == "edit_codes":
+        if state["data"]["batch_type"] == "usage":
+            state["step"] = "usage_limit"
+            send_usage_limit_prompt(chat_id, user_id)
+        else:
+            state["step"] = "codes"
+            send_unique_codes_prompt(chat_id, user_id)
+    elif data == "back_usage_limit":
+        state["step"] = "usage_limit"
+        send_usage_limit_prompt(chat_id, user_id)
+    elif data == "confirm":
+        create_batch_from_draft(chat_id, user_id)
+
+
 def handle_chatid(chat_id, message):
     chat = message.get("chat") or {}
     title = chat.get("title") or chat.get("username") or "当前会话"
@@ -2392,6 +2734,17 @@ def process_message(message):
     chat = message.get("chat") or {}
     user = message.get("from") or {}
     text = (message.get("text") or "").strip()
+    text = {
+        "📦 创建批次": "/newbatch",
+        "📋 批次列表": "/batches",
+        "🗒 最近记录": "/records",
+        "⚙️ 默认条件": "/defaults",
+        "🧩 核心流程": "/flow",
+        "📊 已记录群": "/groups",
+        "🛡 接收状态": "/botstatus",
+        "👤 我的ID": "/whoami",
+        "⬅️ 取消": "取消操作",
+    }.get(text, text)
     chat_id = chat.get("id")
     user_id = user.get("id")
     if not chat_id or not user_id:
