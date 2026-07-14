@@ -1165,25 +1165,25 @@ def verify_keyboard(token, choices):
 
 
 CAPTCHA_FONT = {
-    "0": ["111", "101", "101", "101", "111"],
-    "1": ["010", "110", "010", "010", "111"],
-    "2": ["111", "001", "111", "100", "111"],
-    "3": ["111", "001", "111", "001", "111"],
-    "4": ["101", "101", "111", "001", "001"],
-    "5": ["111", "100", "111", "001", "111"],
-    "6": ["111", "100", "111", "101", "111"],
-    "7": ["111", "001", "010", "010", "010"],
-    "8": ["111", "101", "111", "101", "111"],
-    "9": ["111", "101", "111", "001", "111"],
-    "+": ["000", "010", "111", "010", "000"],
-    "-": ["000", "000", "111", "000", "000"],
-    "x": ["000", "101", "010", "101", "000"],
-    "/": ["001", "001", "010", "100", "100"],
-    "(": ["011", "100", "100", "100", "011"],
-    ")": ["110", "001", "001", "001", "110"],
-    "=": ["000", "111", "000", "111", "000"],
-    "?": ["111", "001", "010", "000", "010"],
-    " ": ["0", "0", "0", "0", "0"],
+    "0": ["01110", "10001", "10011", "10101", "11001", "10001", "01110"],
+    "1": ["00100", "01100", "00100", "00100", "00100", "00100", "01110"],
+    "2": ["01110", "10001", "00001", "00010", "00100", "01000", "11111"],
+    "3": ["11110", "00001", "00001", "01110", "00001", "00001", "11110"],
+    "4": ["00010", "00110", "01010", "10010", "11111", "00010", "00010"],
+    "5": ["11111", "10000", "10000", "11110", "00001", "00001", "11110"],
+    "6": ["01110", "10000", "10000", "11110", "10001", "10001", "01110"],
+    "7": ["11111", "00001", "00010", "00100", "01000", "01000", "01000"],
+    "8": ["01110", "10001", "10001", "01110", "10001", "10001", "01110"],
+    "9": ["01110", "10001", "10001", "01111", "00001", "00001", "01110"],
+    "+": ["00000", "00100", "00100", "11111", "00100", "00100", "00000"],
+    "-": ["00000", "00000", "00000", "11111", "00000", "00000", "00000"],
+    "x": ["00000", "10001", "01010", "00100", "01010", "10001", "00000"],
+    "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
+    "(": ["00010", "00100", "01000", "01000", "01000", "00100", "00010"],
+    ")": ["01000", "00100", "00010", "00010", "00010", "00100", "01000"],
+    "=": ["00000", "11111", "00000", "00000", "11111", "00000", "00000"],
+    "?": ["01110", "10001", "00001", "00010", "00100", "00000", "00100"],
+    " ": ["00", "00", "00", "00", "00", "00", "00"],
 }
 
 
@@ -1257,10 +1257,11 @@ def draw_rect(pixels, width, height, x, y, w, h, color):
 def draw_char(pixels, width, height, ch, x, y, scale, color):
     pattern = CAPTCHA_FONT.get(ch) or CAPTCHA_FONT["?"]
     char_width = max(len(row) for row in pattern)
+    block_size = max(1, scale - 1)
     for row_index, row in enumerate(pattern):
         for col_index, value in enumerate(row):
             if value == "1":
-                draw_rect(pixels, width, height, x + col_index * scale, y + row_index * scale, scale, scale, color)
+                draw_rect(pixels, width, height, x + col_index * scale, y + row_index * scale, block_size, block_size, color)
     return (char_width + 1) * scale
 
 
@@ -1296,34 +1297,34 @@ def wrap_expression(expression, scale, max_width):
 
 
 def captcha_image_png(expression):
-    width = 760
-    height = 240
-    background = (246, 248, 252)
-    ink = (22, 31, 45)
-    accent = (190, 204, 222)
+    width = 920
+    height = 320
+    background = (248, 250, 253)
+    ink = (15, 23, 42)
+    accent = (213, 223, 236)
     pixels = bytearray([background[0], background[1], background[2]] * width * height)
-    for _ in range(220):
+    for _ in range(90):
         x = random.randint(0, width - 2)
         y = random.randint(0, height - 2)
-        shade = random.randint(180, 230)
-        draw_rect(pixels, width, height, x, y, random.randint(1, 3), random.randint(1, 3), (shade, shade, shade))
-    for _ in range(18):
+        shade = random.randint(205, 238)
+        draw_rect(pixels, width, height, x, y, random.randint(1, 2), random.randint(1, 2), (shade, shade, shade))
+    for _ in range(10):
         x = random.randint(0, width - 80)
         y = random.randint(0, height - 8)
-        draw_rect(pixels, width, height, x, y, random.randint(35, 110), 2, accent)
-    max_text_width = width - 68
+        draw_rect(pixels, width, height, x, y, random.randint(35, 120), 2, accent)
+    max_text_width = width - 80
     scale = 9
     lines = wrap_expression(expression, scale, max_text_width)
-    if len(lines) > 2:
-        scale = 8
-        lines = wrap_expression(expression, scale, max_text_width)
-    if len(lines) > 3:
-        scale = 7
-        lines = wrap_expression(expression, scale, max_text_width)
-    line_height = scale * 7
+    for candidate_scale in (9, 8, 7):
+        candidate_lines = wrap_expression(expression, candidate_scale, max_text_width)
+        if len(candidate_lines) <= 3:
+            scale = candidate_scale
+            lines = candidate_lines
+            break
+    line_height = scale * 9
     y = max(24, (height - (len(lines) * line_height)) // 2)
     for line in lines:
-        draw_text(pixels, width, height, line, 34, y, scale, ink)
+        draw_text(pixels, width, height, line, 40, y, scale, ink)
         y += line_height
     return make_png(width, height, pixels)
 
@@ -4375,7 +4376,33 @@ def chat_info_for_target(target):
     return None
 
 
-def target_name_html(target, link=None):
+def normalize_button_url(link):
+    link = parse_nullable_text(str(link or ""))
+    if not link:
+        return None
+    if link.startswith("t.me/"):
+        return "https://{0}".format(link)
+    if link.startswith("http://") or link.startswith("https://"):
+        return link
+    return link
+
+
+def target_link_for_display(target, fallback_link=None):
+    link = normalize_button_url(fallback_link)
+    if link:
+        return link
+    target = parse_nullable_text(str(target or ""))
+    if not target:
+        return None
+    if target.startswith("@"):
+        return "https://t.me/{0}".format(target[1:])
+    info = chat_info_for_target(target)
+    if info and info["username"]:
+        return "https://t.me/{0}".format(info["username"])
+    return None
+
+
+def target_name_html(target, link=None, include_id=True):
     target = parse_nullable_text(str(target or ""))
     if not target:
         return "<i>未绑定</i>"
@@ -4387,17 +4414,20 @@ def target_name_html(target, link=None):
         title = target if target.startswith("@") else "未命名群聊/频道"
     label = html.escape(str(title))
     escaped_target = html.escape(str(target))
+    link = target_link_for_display(target, link)
     if link:
         label = '<a href="{0}">{1}</a>'.format(html.escape(str(link), quote=True), label)
     else:
         label = "<b>{0}</b>".format(label)
+    if not include_id:
+        return label
     return "{0} <code>{1}</code>".format(label, escaped_target)
 
 
-def subscription_display_html(data):
+def subscription_display_html(data, include_id=True):
     target = data_value(data, "required_channel_id")
     link = data_value(data, "required_channel_link") or default_subscription_link(target)
-    return target_name_html(target, link)
+    return target_name_html(target, link, include_id)
 
 
 def settings_status_lines(data):
@@ -4917,14 +4947,13 @@ def condition_lines(batch):
     group_messages = int(data_value(batch, "required_group_messages", 0) or 0)
     channel_id = data_value(batch, "required_channel_id")
     if group_id and group_messages > 0:
-        lines.append(
-            ui_field(
-                "群发言数",
-                "{0} 普通发言至少 {1}".format(target_name_html(group_id), ui_number(group_messages)),
-            )
-        )
+        group_name = target_name_html(group_id, include_id=False)
+        lines.append(ui_field("群发言数", ""))
+        lines.append("• 需要加入群聊 {0}，且发言数大于 {1}".format(group_name, ui_number(group_messages)))
     if channel_id:
-        lines.append(ui_field("频道订阅", subscription_display_html(batch)))
+        channel_name = subscription_display_html(batch, include_id=False)
+        lines.append(ui_field("频道订阅", ""))
+        lines.append("• 需要订阅 {0}".format(channel_name))
     if not lines:
         lines.append(ui_field("领取条件", "<i>无额外条件</i>"))
     return ["<b>⚙️ 领取条件</b>"] + lines
@@ -5585,6 +5614,21 @@ def create_batch_from_draft(chat_id, user_id):
     )
 
 
+def subscription_button_keyboard(batch):
+    channel_id = data_value(batch, "required_channel_id")
+    link = target_link_for_display(
+        channel_id,
+        data_value(batch, "required_channel_link") or default_subscription_link(channel_id),
+    )
+    if not link:
+        return None
+    return {
+        "inline_keyboard": [
+            [{"text": "订阅频道", "url": link}]
+        ]
+    }
+
+
 def check_claim_conditions(conn, user, batch):
     group_id = batch["required_group_id"]
     group_messages = batch["required_group_messages"] or 0
@@ -5629,12 +5673,13 @@ def check_claim_conditions(conn, user, batch):
             )
         member = get_chat_member_cached(channel_id, user["id"])
         if not member_is_joined(member):
-            channel_link = data_value(batch, "required_channel_link") or default_subscription_link(channel_id)
-            open_text = "\n" + ui_field("订阅入口", subscription_display_html(batch)) if channel_link else ""
             return (
                 False,
                 "channel_not_joined",
-                ui_error("领取失败", "请先完成频道订阅，然后重新打开领取链接。{0}".format(open_text)),
+                (
+                    ui_error("领取失败", "请先完成频道订阅，然后重新打开领取链接。"),
+                    subscription_button_keyboard(batch),
+                ),
             )
 
     return True, None, None
@@ -5647,8 +5692,17 @@ def claim_success_message(code):
     )
 
 
+def unpack_response(response):
+    if isinstance(response, tuple):
+        text = response[0] if len(response) > 0 else None
+        markup = response[1] if len(response) > 1 else None
+        return text, markup
+    return response, None
+
+
 def issue_code_v2(chat_id, user, batch_token):
     response_text = None
+    response_markup = None
 
     with db_connect() as conn:
         upsert_user(conn, user)
@@ -5671,10 +5725,10 @@ def issue_code_v2(chat_id, user, batch_token):
                 conditions_ok, reason, message = check_claim_conditions(conn, user, batch)
                 if not conditions_ok:
                     log_claim(conn, user, batch, None, "failed", 1, reason)
-                    response_text = message
+                    response_text, response_markup = unpack_response(message)
 
     if response_text:
-        send_message_async(chat_id, response_text)
+        send_message_async(chat_id, response_text, response_markup)
         return
 
     conn = db_connect()
