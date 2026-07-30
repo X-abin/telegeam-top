@@ -666,7 +666,8 @@
         <label class="field">
           <span class="label">请求方式</span>
           <select id="fetch-mode">
-            <option value="direct">浏览器直连</option>
+            <option value="same-origin">同域直连（自动 Cookie）</option>
+            <option value="direct">跨域直连</option>
             <option value="proxy">可信代理</option>
           </select>
         </label>
@@ -832,7 +833,10 @@
       const proxyUrl = $('proxy-url').value.trim();
       const fetchMode = $('fetch-mode').value;
 
-      if (!/^https?:\/\//i.test(baseUrl)) {
+      if (fetchMode === 'same-origin' && !/^https?:$/i.test(window.location.protocol)) {
+        throw new Error('同域直连需要通过 NewAPI 域名访问页面，不能直接打开本地 HTML 文件。');
+      }
+      if (fetchMode !== 'same-origin' && !/^https?:\/\//i.test(baseUrl)) {
         throw new Error('Base URL 需要以 http:// 或 https:// 开头。');
       }
       if (fetchMode === 'proxy' && !/^https?:\/\//i.test(proxyUrl)) {
@@ -840,6 +844,10 @@
       }
 
       return { baseUrl, apiUser, proxyUrl, fetchMode };
+    }
+
+    function getDefaultFetchMode() {
+      return window.location.hostname === 'maolaoapi.com' ? 'same-origin' : 'direct';
     }
 
     function toUnixSecondFromDate(value, endOfDay = false) {
@@ -850,11 +858,14 @@
     }
 
     function buildApiUrl(path, params = {}) {
-      const { baseUrl } = getApiConfig();
-      const url = new URL(path, `${baseUrl}/`);
+      const { baseUrl, fetchMode } = getApiConfig();
+      const url = new URL(path, fetchMode === 'same-origin' ? window.location.origin : `${baseUrl}/`);
       for (const [key, value] of Object.entries(params)) {
         if (value == null || value === '') continue;
         url.searchParams.set(key, String(value));
+      }
+      if (fetchMode === 'same-origin') {
+        return `${url.pathname}${url.search}${url.hash}`;
       }
       return url.toString();
     }
@@ -873,6 +884,7 @@
           body: JSON.stringify({ url, method: 'GET', headers }),
         });
       } else {
+        warnIfCrossOriginWithoutCookie(url, config);
         response = await fetch(url, {
           method: 'GET',
           headers,
@@ -891,10 +903,20 @@
       }
     }
 
+    function warnIfCrossOriginWithoutCookie(url, config) {
+      if (config.fetchMode !== 'direct') return;
+      const target = new URL(url);
+      if (target.origin === window.location.origin) return;
+      setFetchStatus('当前是跨域直连，浏览器通常不会携带 NewAPI 登录 Cookie。建议把页面部署到 NewAPI 同域并选择“同域直连（自动 Cookie）”。', 'error');
+    }
+
     function formatFetchError(error) {
       const detail = error?.message || String(error);
+      if (/HTTP 401|unauthorized|未授权/i.test(detail)) {
+        return `${detail}。接口没有识别到登录态，通常是请求没有携带 NewAPI Cookie。请在 NewAPI 同域访问本工具，并使用“同域直连（自动 Cookie）”。`;
+      }
       if (/failed to fetch|cors|network/i.test(detail)) {
-        return `${detail}。如果这是跨域限制，请在 NewAPI 允许本站跨域携带凭据，或使用部署在 NewAPI 同域下的可信代理。`;
+        return `${detail}。如果这是跨域限制，请把本工具部署到 NewAPI 同域并使用“同域直连（自动 Cookie）”，或使用可信代理。`;
       }
       return detail;
     }
@@ -2175,7 +2197,7 @@
       $('log-page-size').value = '100';
       $('log-pages').value = '5';
       $('model-filter').value = '';
-      $('fetch-mode').value = 'direct';
+      $('fetch-mode').value = getDefaultFetchMode();
       $('proxy-url').value = '';
       $('channel-json').value = '';
       $('log-json').value = '';
@@ -2219,6 +2241,7 @@
     });
 
     renderEmpty();
+    $('fetch-mode').value = getDefaultFetchMode();
     setDefaultDateRange();
     setFetchStatus('等待拉取。');
   </script>
