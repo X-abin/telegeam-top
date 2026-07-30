@@ -1,0 +1,27 @@
+name: Deploy NewAPI workflow proxy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - workers/newapi-workflow-proxy.js
+      - .github/workflows/deploy-newapi-proxy.yml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy Cloudflare Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy workers/newapi-workflow-proxy.js --name newapi-workflow-proxy --compatibility-date 2026-07-30
