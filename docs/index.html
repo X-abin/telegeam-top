@@ -1,0 +1,1862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>channel-renewal-analysis</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f7fb;
+      --bg-soft: #e9eef7;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --text: #102033;
+      --muted: #5d6b7f;
+      --line: #d7dfeb;
+      --shadow: 0 18px 40px rgba(16, 32, 51, 0.08);
+      --blue: #2d6cdf;
+      --blue-soft: rgba(45, 108, 223, 0.14);
+      --green: #1f9d68;
+      --green-soft: rgba(31, 157, 104, 0.14);
+      --orange: #c97b13;
+      --orange-soft: rgba(201, 123, 19, 0.14);
+      --red: #d94b4b;
+      --red-soft: rgba(217, 75, 75, 0.14);
+      --teal: #0f8b8d;
+      --teal-soft: rgba(15, 139, 141, 0.14);
+      --radius: 18px;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0e1420;
+        --bg-soft: #111a29;
+        --surface: #151d2b;
+        --surface-2: #101725;
+        --text: #e8eef7;
+        --muted: #99a6b8;
+        --line: #263244;
+        --shadow: 0 18px 40px rgba(0, 0, 0, 0.34);
+        --blue: #78a6ff;
+        --blue-soft: rgba(120, 166, 255, 0.18);
+        --green: #4fce97;
+        --green-soft: rgba(79, 206, 151, 0.18);
+        --orange: #f0ad4e;
+        --orange-soft: rgba(240, 173, 78, 0.16);
+        --red: #ff7878;
+        --red-soft: rgba(255, 120, 120, 0.16);
+        --teal: #4bd0d2;
+        --teal-soft: rgba(75, 208, 210, 0.16);
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      background: radial-gradient(circle at top left, var(--bg-soft), var(--bg) 42%);
+      color: var(--text);
+      font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    body {
+      min-height: 100vh;
+    }
+
+    button, input, select, textarea {
+      font: inherit;
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    .app {
+      width: min(1480px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0 40px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.45fr) minmax(240px, 0.55fr);
+      gap: 20px;
+      align-items: stretch;
+      margin-bottom: 20px;
+    }
+
+    .hero-copy, .hero-score, .panel {
+      background: color-mix(in srgb, var(--surface) 96%, transparent);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .hero-copy {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .eyebrow {
+      margin: 0;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 12px;
+    }
+
+    h1, h2, h3, p {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 28px;
+      line-height: 1.2;
+    }
+
+    .hero-copy p {
+      color: var(--muted);
+      max-width: 72ch;
+      line-height: 1.65;
+    }
+
+    .hero-badges {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      line-height: 1;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+    }
+
+    .badge strong {
+      font-weight: 500;
+    }
+
+    .hero-score {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: center;
+    }
+
+    .score-ring {
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at center, var(--surface) 0 58%, transparent 59%),
+        conic-gradient(var(--blue) 0 var(--score-angle, 60%), var(--line) 0);
+      border: 1px solid var(--line);
+      min-height: 210px;
+    }
+
+    .score-inner {
+      text-align: center;
+      display: grid;
+      gap: 4px;
+      padding: 16px;
+    }
+
+    .score-value {
+      font-size: 38px;
+      font-weight: 500;
+      line-height: 1;
+    }
+
+    .score-label {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .score-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .layout {
+      display: grid;
+      gap: 20px;
+    }
+
+    .panel {
+      padding: 20px;
+    }
+
+    .panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+
+    .panel-head h2 {
+      font-size: 18px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 10px 14px;
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      border-color: color-mix(in srgb, var(--blue) 35%, var(--line));
+    }
+
+    .btn-primary {
+      background: var(--blue);
+      color: #fff;
+      border-color: transparent;
+    }
+
+    .btn-danger {
+      background: var(--red-soft);
+      color: var(--text);
+    }
+
+    .input-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field label, .field .label {
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    textarea, select, input[type="date"], input[type="file"] {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+      color: var(--text);
+      border-radius: 14px;
+      padding: 12px 14px;
+      min-width: 0;
+    }
+
+    textarea {
+      min-height: 180px;
+      resize: vertical;
+      line-height: 1.5;
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .stat {
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      display: grid;
+      gap: 8px;
+      min-height: 112px;
+    }
+
+    .stat .label {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .stat .value {
+      font-size: 26px;
+      font-weight: 500;
+      line-height: 1.1;
+    }
+
+    .stat .note {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .grid-two {
+      display: grid;
+      grid-template-columns: 1.4fr 0.9fr;
+      gap: 20px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 20px;
+    }
+
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 18px;
+      display: grid;
+      gap: 12px;
+    }
+
+    .chart-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .chart-head p {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+      max-width: 70ch;
+    }
+
+    .chart-frame {
+      width: 100%;
+      overflow: hidden;
+    }
+
+    svg {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    .insight-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .recommendation {
+      display: grid;
+      gap: 12px;
+    }
+
+    .decision {
+      display: grid;
+      gap: 8px;
+      padding: 18px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, var(--surface), var(--surface-2));
+      border: 1px solid var(--line);
+    }
+
+    .decision-title {
+      font-size: 20px;
+      font-weight: 500;
+    }
+
+    .decision-meta {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .pill {
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      background: var(--surface-2);
+    }
+
+    .pill.green {
+      background: var(--green-soft);
+      border-color: color-mix(in srgb, var(--green) 20%, var(--line));
+    }
+
+    .pill.orange {
+      background: var(--orange-soft);
+      border-color: color-mix(in srgb, var(--orange) 20%, var(--line));
+    }
+
+    .pill.red {
+      background: var(--red-soft);
+      border-color: color-mix(in srgb, var(--red) 20%, var(--line));
+    }
+
+    .pill.blue {
+      background: var(--blue-soft);
+      border-color: color-mix(in srgb, var(--blue) 20%, var(--line));
+    }
+
+    .reason-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .reason {
+      display: grid;
+      gap: 4px;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: var(--surface-2);
+      border: 1px solid var(--line);
+    }
+
+    .reason strong {
+      font-weight: 500;
+    }
+
+    .reason span {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th, td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 500;
+      background: var(--surface-2);
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .empty {
+      padding: 24px;
+      color: var(--muted);
+      text-align: center;
+      border: 1px dashed var(--line);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--surface) 80%, transparent);
+    }
+
+    .footnote {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 1120px) {
+      .hero, .grid-two {
+        grid-template-columns: 1fr;
+      }
+
+      .status-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 760px) {
+      .app {
+        width: min(100vw - 20px, 1480px);
+        padding: 14px 0 28px;
+      }
+
+      .input-grid, .controls, .status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .score-ring {
+        min-height: 190px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">NewAPI channel renewal analysis</p>
+        <h1>渠道续费价值分析</h1>
+        <p>
+          贴入 <code>/api/channel/</code> 和 <code>/api/log/</code> 的返回 JSON，按成功率、错误率、平均响应时间、额度消耗、
+          模型分布、请求趋势和异常请求综合评估某个渠道是否值得继续续费或复充。
+        </p>
+        <div class="hero-badges">
+          <span class="badge"><strong>输入</strong> 两个接口返回</span>
+          <span class="badge"><strong>输出</strong> 指标、图表、建议</span>
+          <span class="badge"><strong>依据</strong> docs 里的 `data.items[]`</span>
+        </div>
+      </div>
+      <div class="hero-score">
+        <div class="score-ring" id="score-ring">
+          <div class="score-inner">
+            <div class="score-value" id="score-value">--</div>
+            <div class="score-label" id="score-label">等待分析</div>
+          </div>
+        </div>
+        <div class="score-note" id="score-note">先填入接口 JSON，再点“开始分析”。</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>数据输入</h2>
+          <p class="footnote">支持完整响应对象、`data.items` 或直接数组。`/api/log/` 会按渠道 ID 自动过滤。</p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="load-demo" type="button">填充示例</button>
+          <button class="btn btn-primary" id="run-analysis" type="button">开始分析</button>
+          <button class="btn btn-danger" id="clear-all" type="button">清空</button>
+        </div>
+      </div>
+
+      <div class="input-grid">
+        <label class="field">
+          <span class="label">/api/channel/ 返回 JSON</span>
+          <textarea id="channel-json" spellcheck="false" placeholder="把 /api/channel/ 的返回结果粘贴到这里"></textarea>
+          <input id="channel-file" type="file" accept=".json,application/json">
+        </label>
+        <label class="field">
+          <span class="label">/api/log/ 返回 JSON</span>
+          <textarea id="log-json" spellcheck="false" placeholder="把 /api/log/ 的返回结果粘贴到这里"></textarea>
+          <input id="log-file" type="file" accept=".json,application/json">
+        </label>
+      </div>
+
+      <div class="controls">
+        <label class="field">
+          <span class="label">渠道选择</span>
+          <select id="channel-select"></select>
+        </label>
+        <label class="field">
+          <span class="label">开始日期</span>
+          <input id="start-date" type="date">
+        </label>
+        <label class="field">
+          <span class="label">结束日期</span>
+          <input id="end-date" type="date">
+        </label>
+        <label class="field">
+          <span class="label">分析口径</span>
+          <select id="analysis-mode">
+            <option value="usage">只看消费与错误日志</option>
+            <option value="all">包含全部日志类型</option>
+          </select>
+        </label>
+      </div>
+    </section>
+
+    <section class="status-grid" id="status-grid"></section>
+
+    <section class="grid-two">
+      <div class="stack">
+        <section class="chart-card">
+          <div class="chart-head">
+            <div>
+              <h2>请求量趋势</h2>
+              <p>按天拆分成功请求与错误请求，观察这个渠道的活跃度和波动情况。</p>
+            </div>
+          </div>
+          <div class="chart-frame" id="trend-chart"></div>
+        </section>
+
+        <section class="chart-card">
+          <div class="chart-head">
+            <div>
+              <h2>平均响应时间趋势</h2>
+              <p>对比每日平均耗时、P95 耗时和渠道接口里的基线响应时间。</p>
+            </div>
+          </div>
+          <div class="chart-frame" id="latency-chart"></div>
+        </section>
+      </div>
+
+      <div class="insight-grid">
+        <section class="chart-card recommendation">
+          <div class="chart-head">
+            <div>
+              <h2>最终结论</h2>
+              <p>综合上述指标，给出明确的续费建议。</p>
+            </div>
+          </div>
+          <div class="decision" id="decision-box">
+            <div class="decision-title" id="decision-title">等待分析</div>
+            <div class="decision-meta" id="decision-meta"></div>
+            <div class="footnote" id="decision-desc">没有数据时，先填入接口返回再判断。</div>
+          </div>
+        </section>
+
+        <section class="chart-card">
+          <div class="chart-head">
+            <div>
+              <h2>模型使用分布</h2>
+              <p>看这个渠道主要承载哪些模型，以及是否过于集中在少数模型上。</p>
+            </div>
+          </div>
+          <div class="chart-frame" id="model-chart"></div>
+        </section>
+
+        <section class="chart-card">
+          <div class="chart-head">
+            <div>
+              <h2>异常请求</h2>
+              <p>展示错误、超时、限流、异常耗时等需要重点关注的请求样本。</p>
+            </div>
+          </div>
+          <div id="anomaly-table"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const state = {
+      channels: [],
+      logs: [],
+      selectedChannelId: null,
+      analysisMode: 'usage',
+    };
+
+    const errorKeywords = [
+      'error', 'fail', 'failed', 'timeout', 'timed out', '超时', '失败', '错误',
+      'rate limit', 'rate-limit', 'quota', 'overload', 'unavailable', '拒绝',
+      'invalid', 'connection', 'reset', 'closed', '429', '500', '502', '503'
+    ];
+
+    function escapeHtml(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#39;');
+    }
+
+    function clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    }
+
+    function fmtInt(value) {
+      if (!Number.isFinite(value)) return '--';
+      return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(Math.round(value));
+    }
+
+    function fmtFloat(value, digits = 1) {
+      if (!Number.isFinite(value)) return '--';
+      return new Intl.NumberFormat('zh-CN', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
+    }
+
+    function fmtPercent(value, digits = 1) {
+      if (!Number.isFinite(value)) return '--';
+      return `${fmtFloat(value * 100, digits)}%`;
+    }
+
+    function fmtMs(value) {
+      if (!Number.isFinite(value)) return '--';
+      return `${fmtFloat(value, value >= 100 ? 0 : 1)} ms`;
+    }
+
+    function fmtQuota(value) {
+      if (!Number.isFinite(value)) return '--';
+      return new Intl.NumberFormat('zh-CN', {
+        minimumFractionDigits: value < 10 && value !== Math.round(value) ? 2 : 0,
+        maximumFractionDigits: 2
+      }).format(value);
+    }
+
+    function safeJsonParse(text) {
+      const trimmed = String(text || '').trim();
+      if (!trimmed) return null;
+      return JSON.parse(trimmed);
+    }
+
+    function extractItems(payload) {
+      if (!payload) return [];
+      if (Array.isArray(payload)) return payload;
+      if (Array.isArray(payload.items)) return payload.items;
+      if (payload.data) {
+        if (Array.isArray(payload.data)) return payload.data;
+        if (Array.isArray(payload.data.items)) return payload.data.items;
+      }
+      return [];
+    }
+
+    function readEndpointPayload(text) {
+      const parsed = safeJsonParse(text);
+      return extractItems(parsed);
+    }
+
+    function readDateValue(value) {
+      if (!value) return null;
+      const time = Date.parse(`${value}T00:00:00`);
+      return Number.isFinite(time) ? time : null;
+    }
+
+    function getTimestamp(item) {
+      const raw = item.created_at ?? item.created_time ?? item.timestamp ?? item.time ?? item.createdAt;
+      const value = Number(raw);
+      if (Number.isFinite(value) && value > 0) {
+        return value > 1e12 ? value : value * 1000;
+      }
+      if (typeof raw === 'string') {
+        const parsed = Date.parse(raw);
+        if (Number.isFinite(parsed)) return parsed;
+      }
+      return null;
+    }
+
+    function toDateKey(ts) {
+      const date = new Date(ts);
+      const yyyy = date.getFullYear();
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      const dd = String(date.getDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    }
+
+    function formatDateKey(key) {
+      const [y, m, d] = key.split('-').map(Number);
+      const date = new Date(y, m - 1, d);
+      return `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
+    }
+
+    function classifyLog(log) {
+      const type = Number(log.type);
+      const content = String(log.content ?? '').toLowerCase();
+      const errorSignal = type === 5 || errorKeywords.some((keyword) => content.includes(keyword));
+      const refundSignal = type === 6;
+      const usageSignal = type === 2 || (!errorSignal && !refundSignal && (
+        log.quota != null || log.use_time != null || log.model_name || log.model
+      ));
+      const requestSignal = usageSignal || errorSignal;
+      return { errorSignal, refundSignal, usageSignal, requestSignal };
+    }
+
+    function buildDemoData() {
+      const channels = {
+        success: true,
+        message: '',
+        data: {
+          items: [
+            {
+              id: 355,
+              type: 1,
+              vendor_id: 12,
+              status: 1,
+              name: '示例渠道 A',
+              weight: 10,
+              concurrency_limit: 0,
+              created_time: 1783046400,
+              test_time: 1785392566,
+              response_time: 820,
+              base_url: 'https://upstream.example.com',
+              balance: 12.34,
+              balance_updated_time: 1785392566,
+              models: 'gpt-4o,gpt-4o-mini,claude-3.5-sonnet',
+              group: 'default',
+              group_ids: [1],
+              group_details: [],
+              used_quota: 123456,
+              model_mapping: '',
+              priority: 0,
+              auto_ban: 1,
+              tag: 'openai',
+              remark: '示例数据，仅用于演示'
+            },
+            {
+              id: 411,
+              type: 1,
+              vendor_id: 15,
+              status: 0,
+              name: '示例渠道 B',
+              weight: 6,
+              concurrency_limit: 0,
+              created_time: 1783046400,
+              test_time: 1785392566,
+              response_time: 2450,
+              base_url: 'https://backup.example.com',
+              balance: 3.21,
+              balance_updated_time: 1785392566,
+              models: 'gpt-4o-mini',
+              group: 'backup',
+              group_ids: [2],
+              group_details: [],
+              used_quota: 55432,
+              model_mapping: '',
+              priority: 1,
+              auto_ban: 0,
+              tag: 'backup',
+              remark: '停用示例'
+            }
+          ],
+          total: 2,
+          page: 1,
+          page_size: 100,
+          type_counts: { '1': 2 },
+          vendor_counts: { '12': 1, '15': 1 }
+        }
+      };
+
+      const logs = [];
+      const base = Date.now() - 20 * 24 * 3600 * 1000;
+      const models = ['gpt-4o', 'gpt-4o-mini', 'claude-3.5-sonnet'];
+      let id = 9000;
+
+      for (let day = 0; day < 21; day++) {
+        const dayTs = base + day * 24 * 3600 * 1000;
+        const usageCount = 18 + Math.round(Math.sin(day / 3) * 4) + (day > 13 ? -2 : 1);
+        const errorCount = day % 6 === 0 ? 3 : (day % 5 === 0 ? 2 : 1);
+
+        for (let i = 0; i < usageCount; i++) {
+          const model = models[(day + i) % models.length];
+          const useTime = 780 + ((day * 83 + i * 41) % 640) + (day > 15 ? 140 : 0);
+          const quota = 860 + ((day * 57 + i * 29) % 780);
+          const prompt = 620 + ((day * 19 + i * 11) % 390);
+          const completion = 160 + ((day * 13 + i * 7) % 220);
+          logs.push({
+            id: id++,
+            site_id: 1,
+            user_id: 1001,
+            created_at: Math.floor((dayTs + i * 4100) / 1000),
+            type: 2,
+            content: '请求成功',
+            username: 'alice',
+            token_name: 'team-key',
+            model_name: model,
+            quota,
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            use_time: useTime,
+            is_stream: i % 2 === 0,
+            channel: 355,
+            channel_name: '示例渠道 A',
+            token_id: 2001,
+            group: 'default',
+            group_name: '默认分组',
+            ip: `203.0.113.${10 + (i % 6)}`,
+            request_id: `req-${day}-${i}`,
+            upstream_request_id: `up-${day}-${i}`,
+            other: '{}'
+          });
+        }
+
+        for (let i = 0; i < errorCount; i++) {
+          const issue = [
+            'upstream timeout',
+            'rate limit exceeded',
+            'connection reset',
+            'upstream unavailable'
+          ][(day + i) % 4];
+          logs.push({
+            id: id++,
+            site_id: 1,
+            user_id: 1001,
+            created_at: Math.floor((dayTs + 76000 + i * 2900) / 1000),
+            type: 5,
+            content: issue,
+            username: 'alice',
+            token_name: 'team-key',
+            model_name: models[(day + i) % models.length],
+            quota: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            use_time: 4500 + day * 90 + i * 180,
+            is_stream: false,
+            channel: 355,
+            channel_name: '示例渠道 A',
+            token_id: 2001,
+            group: 'default',
+            group_name: '默认分组',
+            ip: `203.0.113.${20 + (i % 6)}`,
+            request_id: `err-${day}-${i}`,
+            upstream_request_id: `uerr-${day}-${i}`,
+            other: '{}'
+          });
+        }
+
+        if (day % 7 === 0) {
+          logs.push({
+            id: id++,
+            site_id: 1,
+            user_id: 1001,
+            created_at: Math.floor((dayTs + 86000) / 1000),
+            type: 6,
+            content: '退款',
+            username: 'alice',
+            token_name: 'team-key',
+            model_name: 'gpt-4o-mini',
+            quota: -80,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            use_time: 0,
+            is_stream: false,
+            channel: 355,
+            channel_name: '示例渠道 A',
+            token_id: 2001,
+            group: 'default',
+            group_name: '默认分组',
+            ip: '203.0.113.88',
+            request_id: `refund-${day}`,
+            upstream_request_id: `refund-up-${day}`,
+            other: '{}'
+          });
+        }
+
+        logs.push({
+          id: id++,
+          site_id: 1,
+          user_id: 1001,
+          created_at: Math.floor((dayTs + 90000) / 1000),
+          type: 2,
+          content: '请求成功',
+          username: 'bob',
+          token_name: 'backup-key',
+          model_name: 'gpt-4o-mini',
+          quota: 480,
+          prompt_tokens: 300,
+          completion_tokens: 120,
+          use_time: 1680,
+          is_stream: true,
+          channel: 411,
+          channel_name: '示例渠道 B',
+          token_id: 2002,
+          group: 'backup',
+          group_name: '备用分组',
+          ip: '198.51.100.27',
+          request_id: `other-${day}`,
+          upstream_request_id: `other-up-${day}`,
+          other: '{}'
+        });
+      }
+
+      return {
+        channelJson: JSON.stringify(channels, null, 2),
+        logJson: JSON.stringify({ success: true, message: '', data: { page: 1, page_size: 100, total: logs.length, items: logs } }, null, 2)
+      };
+    }
+
+    function setDemoData() {
+      const demo = buildDemoData();
+      $('channel-json').value = demo.channelJson;
+      $('log-json').value = demo.logJson;
+      hydrateChannels();
+      $('start-date').value = '';
+      $('end-date').value = '';
+      $('analysis-mode').value = 'usage';
+      analyze();
+    }
+
+    function hydrateChannels() {
+      try {
+        state.channels = readEndpointPayload($('channel-json').value);
+      } catch {
+        state.channels = [];
+      }
+
+      const select = $('channel-select');
+      const previous = state.selectedChannelId;
+      select.innerHTML = '';
+
+      if (!state.channels.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '暂无渠道';
+        select.appendChild(option);
+        state.selectedChannelId = null;
+        return;
+      }
+
+      for (const channel of state.channels) {
+        const option = document.createElement('option');
+        option.value = String(channel.id);
+        const status = Number(channel.status) === 1 ? '启用' : '停用';
+        option.textContent = `${channel.name ?? `渠道 ${channel.id}`} (#${channel.id}, ${status})`;
+        select.appendChild(option);
+      }
+
+      const selectedExists = previous != null && state.channels.some((item) => String(item.id) === String(previous));
+      state.selectedChannelId = selectedExists ? previous : state.channels[0].id;
+      select.value = String(state.selectedChannelId);
+    }
+
+    function getSelectedChannel() {
+      const id = state.selectedChannelId != null ? String(state.selectedChannelId) : $('channel-select').value;
+      return state.channels.find((channel) => String(channel.id) === String(id)) || state.channels[0] || null;
+    }
+
+    function getFilteredLogs(channelId) {
+      const startTs = readDateValue($('start-date').value);
+      const endTs = readDateValue($('end-date').value);
+      const mode = $('analysis-mode').value;
+      state.analysisMode = mode;
+
+      return state.logs.filter((log) => {
+        const timestamp = getTimestamp(log);
+        if (startTs != null && timestamp != null && timestamp < startTs) return false;
+        if (endTs != null && timestamp != null && timestamp >= endTs + 24 * 3600 * 1000) return false;
+        if (String(log.channel ?? '') !== String(channelId)) return false;
+        if (mode === 'all') return true;
+        const { requestSignal } = classifyLog(log);
+        return requestSignal;
+      });
+    }
+
+    function analyze() {
+      try {
+        state.channels = readEndpointPayload($('channel-json').value);
+        state.logs = readEndpointPayload($('log-json').value);
+      } catch (error) {
+        showParseError(error);
+        return;
+      }
+
+      if (!state.channels.length) {
+        hydrateChannels();
+      } else {
+        hydrateChannels();
+      }
+
+      const selected = getSelectedChannel();
+      if (!selected) {
+        renderEmpty();
+        return;
+      }
+
+      state.selectedChannelId = selected.id;
+      $('channel-select').value = String(selected.id);
+      const filtered = getFilteredLogs(selected.id);
+      const metrics = analyzeChannel(selected, filtered);
+      renderAll(selected, metrics);
+    }
+
+    function analyzeChannel(channel, logs) {
+      const timestamped = logs
+        .map((log) => ({ log, ts: getTimestamp(log) }))
+        .filter((entry) => entry.ts != null)
+        .sort((a, b) => a.ts - b.ts);
+
+      const requestLogs = logs.filter((log) => {
+        const { requestSignal } = classifyLog(log);
+        return requestSignal;
+      });
+      const usageLogs = requestLogs.filter((log) => classifyLog(log).usageSignal);
+      const errorLogs = requestLogs.filter((log) => classifyLog(log).errorSignal);
+      const successLogs = usageLogs.filter((log) => !classifyLog(log).errorSignal);
+      const refundLogs = logs.filter((log) => Number(log.type) === 6);
+
+      const requestCount = successLogs.length + errorLogs.length;
+      const successCount = successLogs.length;
+      const errorCount = errorLogs.length;
+      const refundCount = refundLogs.length;
+      const successRate = requestCount > 0 ? successCount / requestCount : NaN;
+      const errorRate = requestCount > 0 ? errorCount / requestCount : NaN;
+      const refundRate = requestCount > 0 ? refundCount / requestCount : NaN;
+
+      const successUseTimes = successLogs
+        .map((log) => Number(log.use_time))
+        .filter((value) => Number.isFinite(value) && value > 0);
+      const avgLatency = successUseTimes.length
+        ? successUseTimes.reduce((sum, value) => sum + value, 0) / successUseTimes.length
+        : NaN;
+      const sortedLatency = [...successUseTimes].sort((a, b) => a - b);
+      const p95Latency = sortedLatency.length
+        ? sortedLatency[Math.min(sortedLatency.length - 1, Math.floor(sortedLatency.length * 0.95))]
+        : NaN;
+      const medianLatency = sortedLatency.length
+        ? sortedLatency[Math.floor(sortedLatency.length * 0.5)]
+        : NaN;
+
+      const totalQuota = successLogs.reduce((sum, log) => sum + (Number(log.quota) || 0), 0);
+      const quotaPerSuccess = successCount > 0 ? totalQuota / successCount : NaN;
+
+      const tokenTotal = successLogs.reduce((sum, log) => {
+        const prompt = Number(log.prompt_tokens) || 0;
+        const completion = Number(log.completion_tokens) || 0;
+        return sum + prompt + completion;
+      }, 0);
+      const quotaPerThousandTokens = tokenTotal > 0 ? totalQuota / tokenTotal * 1000 : NaN;
+
+      const modelCounts = new Map();
+      for (const log of successLogs) {
+        const model = String(log.model_name || log.model || 'unknown');
+        modelCounts.set(model, (modelCounts.get(model) || 0) + 1);
+      }
+      const modelStats = [...modelCounts.entries()]
+        .map(([model, count]) => ({ model, count, share: requestCount > 0 ? count / successCount : 0 }))
+        .sort((a, b) => b.count - a.count);
+
+      const entropyNorm = getEntropy(modelStats);
+
+      const daily = buildDailySeries(timestamped);
+      const trend = getTrendScore(daily);
+      const modelScore = clamp(50 + entropyNorm * 50, 35, 100);
+
+      const anomalyDetails = buildAnomalies(requestLogs, p95Latency, channel.response_time);
+      const anomalyCount = anomalyDetails.length;
+      const anomalyRate = requestCount > 0 ? anomalyCount / requestCount : NaN;
+
+      const successScore = scoreSuccessRate(successRate);
+      const latencyScore = scoreLatency(avgLatency, channel.response_time);
+      const costScore = scoreCost(quotaPerSuccess, quotaPerThousandTokens, requestCount);
+      const anomalyScore = scoreAnomalies(anomalyRate, anomalyDetails);
+      const overallScore = clamp(
+        successScore * 0.35 +
+        latencyScore * 0.2 +
+        costScore * 0.2 +
+        trend.score * 0.1 +
+        modelScore * 0.05 +
+        anomalyScore * 0.1,
+        0,
+        100
+      );
+
+      const recommendation = getRecommendation({
+        overallScore,
+        requestCount,
+        successRate,
+        errorRate,
+        avgLatency,
+        anomalyRate,
+        trendRatio: trend.ratio,
+        status: Number(channel.status),
+      });
+
+      return {
+        requestCount,
+        successCount,
+        errorCount,
+        refundCount,
+        successRate,
+        errorRate,
+        refundRate,
+        avgLatency,
+        p95Latency,
+        medianLatency,
+        totalQuota,
+        quotaPerSuccess,
+        quotaPerThousandTokens,
+        modelStats,
+        modelCount: modelStats.length,
+        entropyNorm,
+        daily,
+        trend,
+        anomalyDetails,
+        anomalyCount,
+        anomalyRate,
+        successScore,
+        latencyScore,
+        costScore,
+        anomalyScore,
+        modelScore,
+        overallScore,
+        recommendation,
+        filteredLogs: logs,
+      };
+    }
+
+    function getEntropy(modelStats) {
+      const total = modelStats.reduce((sum, item) => sum + item.count, 0);
+      if (total <= 0 || modelStats.length <= 1) return 0;
+      let entropy = 0;
+      for (const item of modelStats) {
+        const p = item.count / total;
+        entropy -= p * Math.log(p);
+      }
+      return entropy / Math.log(modelStats.length);
+    }
+
+    function buildDailySeries(entries) {
+      const map = new Map();
+      for (const { log, ts } of entries) {
+        const dateKey = toDateKey(ts);
+        if (!map.has(dateKey)) {
+          map.set(dateKey, {
+            key: dateKey,
+            success: 0,
+            error: 0,
+            avgSamples: [],
+            p95Samples: [],
+          });
+        }
+        const bucket = map.get(dateKey);
+        const { errorSignal, usageSignal, requestSignal } = classifyLog(log);
+        if (!requestSignal) continue;
+        if (errorSignal) {
+          bucket.error += 1;
+        } else if (usageSignal) {
+          bucket.success += 1;
+          const latency = Number(log.use_time);
+          if (Number.isFinite(latency) && latency > 0) {
+            bucket.avgSamples.push(latency);
+            bucket.p95Samples.push(latency);
+          }
+        }
+      }
+
+      const allKeys = [...map.keys()].sort();
+      const selectedKeys = allKeys.length > 14 ? allKeys.slice(-14) : allKeys;
+      return selectedKeys.map((key) => {
+        const bucket = map.get(key);
+        const avg = bucket.avgSamples.length
+          ? bucket.avgSamples.reduce((sum, value) => sum + value, 0) / bucket.avgSamples.length
+          : null;
+        const sorted = bucket.p95Samples.slice().sort((a, b) => a - b);
+        const p95 = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] : null;
+        return {
+          key,
+          label: formatDateKey(key),
+          success: bucket.success,
+          error: bucket.error,
+          total: bucket.success + bucket.error,
+          avgLatency: avg,
+          p95Latency: p95,
+        };
+      });
+    }
+
+    function getTrendScore(daily) {
+      const counts = daily.map((day) => day.total);
+      if (counts.length < 4) {
+        return { score: counts.length > 0 ? 65 : 40, ratio: NaN };
+      }
+      const pivot = counts.length > 7 ? counts.length - 7 : Math.ceil(counts.length / 2);
+      const prior = counts.slice(0, pivot).reduce((sum, value) => sum + value, 0);
+      const recent = counts.slice(pivot).reduce((sum, value) => sum + value, 0);
+      const ratio = prior > 0 ? recent / prior : (recent > 0 ? 1.2 : 0);
+      let score = 60;
+      if (ratio >= 1.2) score = 100;
+      else if (ratio >= 1.0) score = 85;
+      else if (ratio >= 0.85) score = 70;
+      else if (ratio >= 0.7) score = 55;
+      else if (ratio >= 0.5) score = 35;
+      else score = 20;
+      return { score, ratio };
+    }
+
+    function scoreSuccessRate(rate) {
+      if (!Number.isFinite(rate)) return 40;
+      if (rate >= 0.98) return 100;
+      if (rate >= 0.95) return 90;
+      if (rate >= 0.9) return 78;
+      if (rate >= 0.85) return 64;
+      if (rate >= 0.75) return 48;
+      if (rate >= 0.65) return 30;
+      return 15;
+    }
+
+    function scoreLatency(avgLatency, baselineLatency) {
+      if (!Number.isFinite(avgLatency)) return 40;
+      let score = 15;
+      if (avgLatency <= 500) score = 100;
+      else if (avgLatency <= 1000) score = 86;
+      else if (avgLatency <= 1500) score = 72;
+      else if (avgLatency <= 2500) score = 55;
+      else if (avgLatency <= 4000) score = 35;
+
+      if (Number.isFinite(baselineLatency) && baselineLatency > 0) {
+        const ratio = avgLatency / baselineLatency;
+        if (ratio <= 1.1) score += 6;
+        else if (ratio <= 1.4) score -= 4;
+        else if (ratio <= 1.8) score -= 10;
+        else score -= 16;
+      }
+      return clamp(score, 0, 100);
+    }
+
+    function scoreCost(quotaPerSuccess, quotaPerThousandTokens, requestCount) {
+      if (!Number.isFinite(quotaPerSuccess) && !Number.isFinite(quotaPerThousandTokens)) {
+        return requestCount > 0 ? 58 : 40;
+      }
+
+      let score = 60;
+      if (Number.isFinite(quotaPerThousandTokens)) {
+        if (quotaPerThousandTokens <= 120) score = 100;
+        else if (quotaPerThousandTokens <= 200) score = 88;
+        else if (quotaPerThousandTokens <= 320) score = 72;
+        else if (quotaPerThousandTokens <= 500) score = 55;
+        else score = 35;
+      } else if (Number.isFinite(quotaPerSuccess)) {
+        if (quotaPerSuccess <= 500) score = 100;
+        else if (quotaPerSuccess <= 900) score = 85;
+        else if (quotaPerSuccess <= 1600) score = 70;
+        else if (quotaPerSuccess <= 3000) score = 50;
+        else score = 28;
+      }
+      return score;
+    }
+
+    function scoreAnomalies(anomalyRate, anomalyDetails) {
+      if (!Number.isFinite(anomalyRate)) return anomalyDetails.length > 0 ? 48 : 66;
+      let score = 100 - anomalyRate * 420;
+      if (anomalyDetails.some((item) => item.reason.includes('超时'))) score -= 8;
+      if (anomalyDetails.some((item) => item.reason.includes('限流'))) score -= 10;
+      return clamp(score, 12, 100);
+    }
+
+    function buildAnomalies(requestLogs, p95Latency, baselineLatency) {
+      const requestCounts = new Map();
+      for (const log of requestLogs) {
+        const key = String(log.request_id || '');
+        if (key) requestCounts.set(key, (requestCounts.get(key) || 0) + 1);
+      }
+
+      const anomalies = [];
+      for (const log of requestLogs) {
+        const { errorSignal } = classifyLog(log);
+        const latency = Number(log.use_time);
+        const content = String(log.content ?? '');
+        const lower = content.toLowerCase();
+        const reasons = [];
+
+        if (errorSignal) reasons.push('错误日志');
+        if (Number.isFinite(latency) && Number.isFinite(p95Latency)) {
+          const threshold = Math.max(4000, p95Latency * 1.5, Number.isFinite(baselineLatency) ? baselineLatency * 3 : 0);
+          if (latency >= threshold) reasons.push('超时/慢请求');
+        }
+        if (/rate limit|限流|429/i.test(content)) reasons.push('限流');
+        if (/timeout|超时/i.test(content)) reasons.push('超时');
+        if (/connection|reset|closed|unavailable|broken/i.test(lower)) reasons.push('连接异常');
+        const reqId = String(log.request_id || '');
+        if (reqId && requestCounts.get(reqId) > 1) reasons.push('重复 request_id');
+
+        if (reasons.length) {
+          anomalies.push({
+            time: getTimestamp(log),
+            model: log.model_name || log.model || 'unknown',
+            requestId: reqId || '--',
+            quota: Number(log.quota) || 0,
+            latency: Number.isFinite(latency) ? latency : NaN,
+            reason: [...new Set(reasons)].join(' / '),
+            content: content || '--',
+            severity: (errorSignal ? 2 : 0) + (reasons.includes('超时/慢请求') ? 1 : 0) + (reasons.includes('限流') ? 1 : 0),
+          });
+        }
+      }
+
+      return anomalies.sort((a, b) => b.severity - a.severity || (b.latency || 0) - (a.latency || 0)).slice(0, 8);
+    }
+
+    function getRecommendation(data) {
+      const { overallScore, requestCount, successRate, errorRate, avgLatency, anomalyRate, trendRatio, status } = data;
+      if (requestCount < 10) {
+        return {
+          label: '谨慎续费',
+          tone: 'orange',
+          short: '样本较少，先补数据再决定是否续费。',
+          detail: '当前请求样本偏少，建议继续观察一段时间，再结合更完整的日志做判断。',
+        };
+      }
+
+      if (status === 0) {
+        return {
+          label: '暂不续费',
+          tone: 'orange',
+          short: '渠道当前处于停用状态，不适合直接复充。',
+          detail: '渠道状态本身已经偏弱，即使局部指标不差，也更建议先排查可用性再决定是否续费。',
+        };
+      }
+
+      if (successRate < 0.8 || errorRate > 0.2 || anomalyRate > 0.18 || (Number.isFinite(avgLatency) && avgLatency > 5000)) {
+        return {
+          label: '建议更换渠道',
+          tone: 'red',
+          short: '成功率或稳定性已经明显拖后腿。',
+          detail: '错误率、异常请求或响应时间已经到达不值得继续投入的区间，优先考虑更换渠道。',
+        };
+      }
+
+      if (overallScore >= 80 && successRate >= 0.95 && errorRate <= 0.05 && anomalyRate <= 0.05 && (!Number.isFinite(avgLatency) || avgLatency <= 1500)) {
+        return {
+          label: '建议续费',
+          tone: 'green',
+          short: '整体表现稳定，续费价值高。',
+          detail: '成功率高、响应快、异常少，适合继续投入或提高额度。',
+        };
+      }
+
+      if (overallScore >= 65 || (successRate >= 0.88 && errorRate <= 0.12 && anomalyRate <= 0.08)) {
+        return {
+          label: '谨慎续费',
+          tone: 'orange',
+          short: '可继续用，但还不够稳。',
+          detail: '这个渠道有一定复充价值，但仍存在效率、波动或异常压力，建议控制续费节奏并持续观察。',
+        };
+      }
+
+      if (trendRatio < 0.6 || anomalyRate > 0.1 || errorRate > 0.15) {
+        return {
+          label: '暂不续费',
+          tone: 'orange',
+          short: '当前性价比不够理想，先别补。',
+          detail: '近期请求趋势走弱，或错误与异常占比偏高，继续续费的边际收益不大。',
+        };
+      }
+
+      if (overallScore < 45) {
+        return {
+          label: '建议更换渠道',
+          tone: 'red',
+          short: '综合得分过低，不建议继续投入。',
+          detail: '从成功率、延迟、额度消耗和异常请求来看，这个渠道已经不适合作为主力渠道。',
+        };
+      }
+
+      return {
+        label: '暂不续费',
+        tone: 'orange',
+        short: '性价比一般，先观察再定。',
+        detail: '可以继续跟踪一段时间，但不建议在当前状态下积极复充。',
+      };
+    }
+
+    function renderAll(channel, metrics) {
+      renderScore(metrics, channel);
+      renderStats(channel, metrics);
+      renderTrendChart(metrics.daily);
+      renderLatencyChart(metrics.daily, channel.response_time);
+      renderModelChart(metrics.modelStats);
+      renderAnomalies(metrics.anomalyDetails);
+      renderDecision(metrics.recommendation, metrics);
+    }
+
+    function renderScore(metrics, channel) {
+      const score = Math.round(metrics.overallScore);
+      $('score-value').textContent = Number.isFinite(score) ? score : '--';
+      $('score-label').textContent = metrics.recommendation.label;
+      $('score-note').textContent = [
+        channel.name || `渠道 ${channel.id}`,
+        Number.isFinite(channel.response_time) ? `接口基线 ${fmtMs(channel.response_time)}` : null,
+        Number.isFinite(metrics.requestCount) ? `${fmtInt(metrics.requestCount)} 条有效请求` : null
+      ].filter(Boolean).join(' · ');
+      $('score-ring').style.setProperty('--score-angle', `${clamp(score * 3.6, 0, 360)}deg`);
+      $('score-ring').style.background = `
+        radial-gradient(circle at center, var(--surface) 0 58%, transparent 59%),
+        conic-gradient(
+          ${metrics.recommendation.tone === 'green' ? 'var(--green)' : metrics.recommendation.tone === 'red' ? 'var(--red)' : 'var(--orange)'} 0 ${clamp(score * 3.6, 0, 360)}deg,
+          var(--line) 0
+        )
+      `;
+    }
+
+    function renderStats(channel, metrics) {
+      const stats = [
+        ['成功率', fmtPercent(metrics.successRate), `错误率 ${fmtPercent(metrics.errorRate)}，退款 ${fmtInt(metrics.refundCount)} 条`],
+        ['平均响应时间', fmtMs(metrics.avgLatency), `P95 ${fmtMs(metrics.p95Latency)}，基线 ${fmtMs(channel.response_time)}`],
+        ['额度消耗', fmtQuota(metrics.totalQuota), `单次 ${fmtQuota(metrics.quotaPerSuccess)}，每千 token ${fmtQuota(metrics.quotaPerThousandTokens)}`],
+        ['请求量', fmtInt(metrics.requestCount), `近 14 天趋势 ${Number.isFinite(metrics.trend.ratio) ? fmtFloat(metrics.trend.ratio, 2) + 'x' : '不足'}`],
+        ['模型数', fmtInt(metrics.modelCount), `集中度 ${fmtPercent(metrics.entropyNorm)}，异常 ${fmtPercent(metrics.anomalyRate)}`],
+        ['综合得分', fmtInt(metrics.overallScore), `建议：${metrics.recommendation.label}`],
+      ];
+
+      $('status-grid').innerHTML = stats.map(([label, value, note]) => `
+        <article class="stat">
+          <div class="label">${escapeHtml(label)}</div>
+          <div class="value">${escapeHtml(value)}</div>
+          <div class="note">${escapeHtml(note)}</div>
+        </article>
+      `).join('');
+    }
+
+    function renderDecision(recommendation, metrics) {
+      $('decision-title').textContent = recommendation.label;
+      const meta = [
+        { text: `总分 ${fmtInt(metrics.overallScore)}`, tone: recommendation.tone },
+        { text: `成功率 ${fmtPercent(metrics.successRate)}`, tone: metrics.successRate >= 0.95 ? 'green' : metrics.successRate >= 0.88 ? 'orange' : 'red' },
+        { text: `异常率 ${fmtPercent(metrics.anomalyRate)}`, tone: metrics.anomalyRate <= 0.05 ? 'green' : metrics.anomalyRate <= 0.1 ? 'orange' : 'red' },
+      ];
+      $('decision-meta').innerHTML = meta.map((item) => `<span class="pill ${item.tone}">${escapeHtml(item.text)}</span>`).join('');
+      $('decision-desc').textContent = `${recommendation.short} ${recommendation.detail}`;
+    }
+
+    function renderTrendChart(daily) {
+      if (!daily.length) {
+        $('trend-chart').innerHTML = '<div class="empty">没有可用于趋势分析的数据。</div>';
+        return;
+      }
+
+      const width = 980;
+      const height = 320;
+      const margin = { top: 24, right: 20, bottom: 48, left: 52 };
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+      const maxValue = Math.max(1, ...daily.map((day) => day.total));
+      const step = innerWidth / daily.length;
+      const barWidth = Math.min(26, Math.max(16, step * 0.58));
+
+      const yTicks = [0, Math.ceil(maxValue / 2), maxValue];
+      const gridLines = yTicks.map((tick) => {
+        const y = margin.top + innerHeight - (tick / maxValue) * innerHeight;
+        return `
+          <line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="var(--line)" stroke-width="1" />
+          <text x="${margin.left - 10}" y="${y + 4}" text-anchor="end" fill="var(--muted)" font-size="12">${tick}</text>
+        `;
+      }).join('');
+
+      const bars = daily.map((day, index) => {
+        const x = margin.left + index * step + (step - barWidth) / 2;
+        const successH = (day.success / maxValue) * innerHeight;
+        const errorH = (day.error / maxValue) * innerHeight;
+        const yBase = margin.top + innerHeight;
+        const successY = yBase - successH;
+        const errorY = successY - errorH;
+        const totalH = successH + errorH;
+        const rate = day.total > 0 ? day.success / day.total : 0;
+        const label = day.label;
+        return `
+          <g>
+            <title>${escapeHtml(`${day.key} 成功 ${day.success}，错误 ${day.error}，成功率 ${fmtPercent(rate)}`)}</title>
+            <rect x="${x}" y="${errorY}" width="${barWidth}" height="${errorH}" rx="6" fill="var(--red)" opacity="0.9"></rect>
+            <rect x="${x}" y="${successY}" width="${barWidth}" height="${successH}" rx="6" fill="var(--green)"></rect>
+            <text x="${x + barWidth / 2}" y="${errorY - 6}" text-anchor="middle" fill="var(--text)" font-size="11">${day.total}</text>
+            <text x="${x + barWidth / 2}" y="${height - 18}" text-anchor="middle" fill="var(--muted)" font-size="11">${escapeHtml(label)}</text>
+            <text x="${x + barWidth / 2}" y="${errorY + 12}" text-anchor="middle" fill="#fff" font-size="10">${day.error > 0 ? day.error : ''}</text>
+          </g>
+        `;
+      }).join('');
+
+      const guide = `
+        <g>
+          <rect x="${margin.left}" y="${margin.top}" width="${innerWidth}" height="${innerHeight}" fill="transparent"></rect>
+          ${gridLines}
+        </g>
+      `;
+
+      $('trend-chart').innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="请求量趋势图">
+          ${guide}
+          ${bars}
+          <g transform="translate(${margin.left}, ${18})">
+            <rect x="0" y="0" width="10" height="10" rx="3" fill="var(--green)"></rect>
+            <text x="14" y="10" fill="var(--muted)" font-size="12">成功</text>
+            <rect x="70" y="0" width="10" height="10" rx="3" fill="var(--red)"></rect>
+            <text x="84" y="10" fill="var(--muted)" font-size="12">错误</text>
+          </g>
+        </svg>
+      `;
+    }
+
+    function renderLatencyChart(daily, baselineLatency) {
+      if (!daily.length) {
+        $('latency-chart').innerHTML = '<div class="empty">没有可用于耗时分析的数据。</div>';
+        return;
+      }
+
+      const width = 980;
+      const height = 300;
+      const margin = { top: 24, right: 24, bottom: 48, left: 52 };
+      const innerWidth = width - margin.left - margin.right;
+      const innerHeight = height - margin.top - margin.bottom;
+
+      const values = daily.flatMap((day) => [day.avgLatency, day.p95Latency]).filter((value) => Number.isFinite(value));
+      const maxValue = Math.max(100, baselineLatency || 0, ...values);
+      const minValue = 0;
+      const scaleY = (value) => margin.top + innerHeight - ((value - minValue) / (maxValue - minValue || 1)) * innerHeight;
+      const step = innerWidth / Math.max(1, daily.length - 1);
+
+      const ticks = [0, Math.ceil(maxValue / 4), Math.ceil(maxValue / 2), Math.ceil(maxValue * 3 / 4), Math.ceil(maxValue)];
+      const gridLines = ticks.map((tick) => {
+        const y = scaleY(tick);
+        return `
+          <line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="var(--line)" stroke-width="1" />
+          <text x="${margin.left - 10}" y="${y + 4}" text-anchor="end" fill="var(--muted)" font-size="12">${fmtInt(tick)}</text>
+        `;
+      }).join('');
+
+      const avgPoints = daily.map((day, index) => {
+        const x = margin.left + (daily.length === 1 ? innerWidth / 2 : index * step);
+        return Number.isFinite(day.avgLatency) ? `${x},${scaleY(day.avgLatency)}` : null;
+      }).filter(Boolean);
+
+      const p95Points = daily.map((day, index) => {
+        const x = margin.left + (daily.length === 1 ? innerWidth / 2 : index * step);
+        return Number.isFinite(day.p95Latency) ? `${x},${scaleY(day.p95Latency)}` : null;
+      }).filter(Boolean);
+
+      const avgPath = polylinePath(daily, scaleY, step, margin.left, (day) => day.avgLatency);
+      const p95Path = polylinePath(daily, scaleY, step, margin.left, (day) => day.p95Latency);
+
+      const points = daily.map((day, index) => {
+        const x = margin.left + (daily.length === 1 ? innerWidth / 2 : index * step);
+        const y = Number.isFinite(day.avgLatency) ? scaleY(day.avgLatency) : null;
+        const y95 = Number.isFinite(day.p95Latency) ? scaleY(day.p95Latency) : null;
+        return `
+          <g>
+            <text x="${x}" y="${height - 18}" text-anchor="middle" fill="var(--muted)" font-size="11">${escapeHtml(day.label)}</text>
+            ${Number.isFinite(y) ? `<circle cx="${x}" cy="${y}" r="4.2" fill="var(--blue)"><title>${escapeHtml(`${day.key} 平均 ${fmtMs(day.avgLatency)}`)}</title></circle>` : ''}
+            ${Number.isFinite(y95) ? `<circle cx="${x}" cy="${y95}" r="4.2" fill="var(--orange)"><title>${escapeHtml(`${day.key} P95 ${fmtMs(day.p95Latency)}`)}</title></circle>` : ''}
+          </g>
+        `;
+      }).join('');
+
+      let baseline = '';
+      if (Number.isFinite(baselineLatency) && baselineLatency > 0) {
+        const y = scaleY(baselineLatency);
+        baseline = `
+          <g>
+            <line x1="${margin.left}" y1="${y}" x2="${width - margin.right}" y2="${y}" stroke="var(--teal)" stroke-dasharray="6 6" stroke-width="2"></line>
+            <text x="${width - margin.right}" y="${y - 6}" text-anchor="end" fill="var(--teal)" font-size="12">基线 ${fmtMs(baselineLatency)}</text>
+          </g>
+        `;
+      }
+
+      $('latency-chart').innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="平均响应时间趋势图">
+          <g>
+            <rect x="${margin.left}" y="${margin.top}" width="${innerWidth}" height="${innerHeight}" fill="transparent"></rect>
+            ${gridLines}
+          </g>
+          ${baseline}
+          ${avgPath ? `<path d="${avgPath}" fill="none" stroke="var(--blue)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>` : ''}
+          ${p95Path ? `<path d="${p95Path}" fill="none" stroke="var(--orange)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>` : ''}
+          ${points}
+          <g transform="translate(${margin.left}, ${18})">
+            <rect x="0" y="0" width="10" height="10" rx="3" fill="var(--blue)"></rect>
+            <text x="14" y="10" fill="var(--muted)" font-size="12">平均</text>
+            <rect x="72" y="0" width="10" height="10" rx="3" fill="var(--orange)"></rect>
+            <text x="86" y="10" fill="var(--muted)" font-size="12">P95</text>
+            <rect x="130" y="0" width="10" height="10" rx="3" fill="var(--teal)"></rect>
+            <text x="144" y="10" fill="var(--muted)" font-size="12">基线</text>
+          </g>
+        </svg>
+      `;
+    }
+
+    function polylinePath(daily, scaleY, step, startX, accessor) {
+      let path = '';
+      let open = false;
+      for (let index = 0; index < daily.length; index++) {
+        const day = daily[index];
+        const value = accessor(day);
+        if (!Number.isFinite(value)) {
+          open = false;
+          continue;
+        }
+        const x = startX + (daily.length === 1 ? step * 0.5 : index * step);
+        const y = scaleY(value);
+        if (!open) {
+          path += `M ${x} ${y}`;
+          open = true;
+        } else {
+          path += ` L ${x} ${y}`;
+        }
+      }
+      return path;
+    }
+
+    function renderModelChart(modelStats) {
+      if (!modelStats.length) {
+        $('model-chart').innerHTML = '<div class="empty">没有可用于模型分布分析的数据。</div>';
+        return;
+      }
+
+      const top = modelStats.slice(0, 6);
+      const other = modelStats.slice(6).reduce((sum, item) => sum + item.count, 0);
+      if (other > 0) {
+        top.push({ model: '其他', count: other, share: other / modelStats.reduce((sum, item) => sum + item.count, 0) });
+      }
+      const width = 980;
+      const rowHeight = 44;
+      const height = 80 + top.length * rowHeight;
+      const margin = { top: 24, right: 24, bottom: 20, left: 170 };
+      const innerWidth = width - margin.left - margin.right;
+      const maxValue = Math.max(...top.map((item) => item.count), 1);
+
+      const bars = top.map((item, index) => {
+        const y = 36 + index * rowHeight;
+        const barWidth = (item.count / maxValue) * innerWidth;
+        return `
+          <g>
+            <text x="12" y="${y + 15}" fill="var(--text)" font-size="13">${escapeHtml(item.model)}</text>
+            <rect x="${margin.left}" y="${y}" width="${innerWidth}" height="20" rx="10" fill="var(--line)" opacity="0.55"></rect>
+            <rect x="${margin.left}" y="${y}" width="${barWidth}" height="20" rx="10" fill="var(--blue)"></rect>
+            <text x="${margin.left + barWidth + 10}" y="${y + 15}" fill="var(--muted)" font-size="13">${fmtInt(item.count)} · ${fmtPercent(item.share)}</text>
+          </g>
+        `;
+      }).join('');
+
+      $('model-chart').innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="模型使用分布图">
+          <text x="12" y="16" fill="var(--muted)" font-size="12">模型</text>
+          <text x="${margin.left}" y="16" fill="var(--muted)" font-size="12">请求数 / 占比</text>
+          ${bars}
+        </svg>
+      `;
+    }
+
+    function renderAnomalies(anomalies) {
+      if (!anomalies.length) {
+        $('anomaly-table').innerHTML = '<div class="empty">没有明显异常请求。</div>';
+        return;
+      }
+
+      const rows = anomalies.map((item) => `
+        <tr>
+          <td>${item.time ? escapeHtml(new Date(item.time).toLocaleString('zh-CN')) : '--'}</td>
+          <td>${escapeHtml(item.model)}</td>
+          <td>${escapeHtml(item.requestId)}</td>
+          <td>${fmtMs(item.latency)}</td>
+          <td>${fmtQuota(item.quota)}</td>
+          <td>${escapeHtml(item.reason)}</td>
+          <td>${escapeHtml(item.content)}</td>
+        </tr>
+      `).join('');
+
+      $('anomaly-table').innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>模型</th>
+                <th>request_id</th>
+                <th>耗时</th>
+                <th>额度</th>
+                <th>异常原因</th>
+                <th>内容</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    function renderEmpty() {
+      $('status-grid').innerHTML = '<div class="empty">先填入渠道和日志 JSON，再开始分析。</div>';
+      $('trend-chart').innerHTML = '<div class="empty">暂无数据。</div>';
+      $('latency-chart').innerHTML = '<div class="empty">暂无数据。</div>';
+      $('model-chart').innerHTML = '<div class="empty">暂无数据。</div>';
+      $('anomaly-table').innerHTML = '<div class="empty">暂无数据。</div>';
+      $('decision-title').textContent = '等待分析';
+      $('decision-meta').innerHTML = '';
+      $('decision-desc').textContent = '没有数据时，先填入接口返回再判断。';
+      $('score-value').textContent = '--';
+      $('score-label').textContent = '等待分析';
+      $('score-note').textContent = '先填入接口 JSON，再点“开始分析”。';
+      $('score-ring').style.background = `
+        radial-gradient(circle at center, var(--surface) 0 58%, transparent 59%),
+        conic-gradient(var(--blue) 0 0deg, var(--line) 0)
+      `;
+    }
+
+    function showParseError(error) {
+      $('decision-title').textContent = 'JSON 解析失败';
+      $('decision-meta').innerHTML = '<span class="pill red">输入错误</span>';
+      $('decision-desc').textContent = error?.message || '请检查 JSON 格式是否完整。';
+      $('score-value').textContent = '--';
+      $('score-label').textContent = '解析失败';
+      $('score-note').textContent = '接口返回需要是合法 JSON。';
+    }
+
+    $('channel-select').addEventListener('change', () => {
+      state.selectedChannelId = $('channel-select').value;
+      analyze();
+    });
+
+    $('analysis-mode').addEventListener('change', () => {
+      analyze();
+    });
+
+    $('start-date').addEventListener('change', () => {
+      analyze();
+    });
+
+    $('end-date').addEventListener('change', () => {
+      analyze();
+    });
+
+    $('run-analysis').addEventListener('click', analyze);
+    $('load-demo').addEventListener('click', setDemoData);
+
+    $('clear-all').addEventListener('click', () => {
+      $('channel-json').value = '';
+      $('log-json').value = '';
+      $('channel-select').innerHTML = '<option value="">暂无渠道</option>';
+      $('start-date').value = '';
+      $('end-date').value = '';
+      state.channels = [];
+      state.logs = [];
+      state.selectedChannelId = null;
+      renderEmpty();
+    });
+
+    async function loadFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ''));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file);
+      });
+    }
+
+    $('channel-file').addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      $('channel-json').value = await loadFileAsText(file);
+      hydrateChannels();
+    });
+
+    $('log-file').addEventListener('change', async (event) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      $('log-json').value = await loadFileAsText(file);
+    });
+
+    $('channel-json').addEventListener('input', () => {
+      hydrateChannels();
+    });
+
+    renderEmpty();
+    setDemoData();
+  </script>
+</body>
+</html>
