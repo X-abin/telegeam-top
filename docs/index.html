@@ -863,11 +863,11 @@
       if (fetchMode !== 'same-origin' && !/^https?:\/\//i.test(baseUrl)) {
         throw new Error('Base URL 需要以 http:// 或 https:// 开头。');
       }
-      if (fetchMode === 'proxy' && !/^https?:\/\//i.test(proxyUrl)) {
+      if (fetchMode === 'proxy' && !isValidProxyUrl(proxyUrl)) {
         throw new Error('使用可信代理时，需要填写代理地址。');
       }
       if (fetchMode === 'workflow-proxy') {
-        if (!/^https?:\/\//i.test(proxyUrl)) {
+        if (!isValidProxyUrl(proxyUrl)) {
           throw new Error('文档 Workflow 模式需要填写可信代理地址。');
         }
         if (!apiCookie) {
@@ -883,6 +883,16 @@
 
     function getDefaultFetchMode() {
       return window.location.hostname === 'maolaoapi.com' ? 'same-origin' : 'workflow-proxy';
+    }
+
+    function getDefaultProxyUrl() {
+      if (!/^https?:$/i.test(window.location.protocol)) return '';
+      if (/github\.io$/i.test(window.location.hostname)) return '';
+      return `${window.location.origin}/proxy`;
+    }
+
+    function isValidProxyUrl(value) {
+      return /^https?:\/\//i.test(value) || /^\/[^\s]*$/i.test(value);
     }
 
     function toUnixSecondFromDate(value, endOfDay = false) {
@@ -2238,7 +2248,7 @@
       $('log-pages').value = '5';
       $('model-filter').value = '';
       $('fetch-mode').value = getDefaultFetchMode();
-      $('proxy-url').value = '';
+      $('proxy-url').value = getDefaultProxyUrl();
       $('channel-json').value = '';
       $('log-json').value = '';
       $('channel-select').innerHTML = '<option value="">暂无渠道</option>';
@@ -2282,6 +2292,7 @@
 
     renderEmpty();
     $('fetch-mode').value = getDefaultFetchMode();
+    $('proxy-url').value = getDefaultProxyUrl();
     setDefaultDateRange();
     setFetchStatus('等待拉取。');
   </script>
