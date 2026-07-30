@@ -915,7 +915,7 @@
         hydrateChannels();
 
         const count = state.channels.length;
-        state.lastFetch = { type: 'channels', count, at: new Date().toISOString() };
+        state.lastFetch = { source: 'online', type: 'channels', count, at: new Date().toISOString() };
         setFetchStatus(`已拉取 ${fmtInt(count)} 个渠道。请选择渠道后点击“拉取并分析”。`, 'ok');
         return state.channels;
       } catch (error) {
@@ -969,24 +969,45 @@
       };
       $('log-json').value = JSON.stringify(combined, null, 2);
       state.logs = allItems;
-      state.lastFetch = { type: 'logs', count: allItems.length, at: new Date().toISOString() };
+      state.lastFetch = { source: 'online', type: 'logs', channelId: String(finalChannelId), count: allItems.length, at: new Date().toISOString() };
       setFetchStatus(`已拉取 ${fmtInt(allItems.length)} 条日志，正在分析...`, 'ok');
       return allItems;
     }
 
-    async function fetchAndAnalyzeOnline() {
+    async function fetchAndAnalyzeOnline(channelId) {
       try {
         if (!state.channels.length) {
           await fetchChannelsOnline();
         }
+        if (channelId != null && channelId !== '') {
+          state.selectedChannelId = String(channelId);
+          $('channel-select').value = String(channelId);
+        }
         const selected = getSelectedChannel();
-        await fetchLogsOnline(selected?.id);
+        if (!selected) {
+          throw new Error('没有可分析的渠道，请先拉取渠道列表。');
+        }
+        await fetchLogsOnline(selected.id);
         analyze();
         const channel = getSelectedChannel();
         setFetchStatus(`分析完成：${channel?.name || `渠道 ${channel?.id || ''}`}，共 ${fmtInt(state.logs.length)} 条日志。`, 'ok');
       } catch (error) {
         setFetchStatus(`拉取或分析失败：${formatFetchError(error)}`, 'error');
       }
+    }
+
+    function shouldRefetchForCurrentSelection() {
+      return state.lastFetch?.source === 'online' && state.channels.length > 0;
+    }
+
+    async function refetchCurrentChannel(reason = '渠道选择已变更') {
+      const selected = getSelectedChannel();
+      if (!selected) {
+        setFetchStatus('没有可分析的渠道，请先拉取渠道列表。', 'error');
+        return;
+      }
+      setFetchStatus(`${reason}，正在拉取 ${selected.name || `渠道 ${selected.id}`} 的日志...`);
+      await fetchAndAnalyzeOnline(selected.id);
     }
 
     function safeJsonParse(text) {
@@ -1263,6 +1284,7 @@
       const demo = buildDemoData();
       $('channel-json').value = demo.channelJson;
       $('log-json').value = demo.logJson;
+      state.lastFetch = { source: 'demo', type: 'demo', at: new Date().toISOString() };
       hydrateChannels();
       $('start-date').value = '';
       $('end-date').value = '';
@@ -2086,27 +2108,65 @@
       $('score-note').textContent = '接口返回需要是合法 JSON。';
     }
 
-    $('channel-select').addEventListener('change', () => {
+    $('channel-select').addEventListener('change', async () => {
       state.selectedChannelId = $('channel-select').value;
-      if (state.logs.length || $('log-json').value.trim()) analyze();
+      if (shouldRefetchForCurrentSelection()) {
+        await refetchCurrentChannel('渠道选择已变更');
+      } else if (state.logs.length || $('log-json').value.trim()) {
+        analyze();
+      }
     });
 
-    $('analysis-mode').addEventListener('change', () => {
-      analyze();
+    $('analysis-mode').addEventListener('change', async () => {
+      if (shouldRefetchForCurrentSelection()) {
+        await refetchCurrentChannel('分析口径已变更');
+      } else {
+        analyze();
+      }
     });
 
-    $('start-date').addEventListener('change', () => {
-      analyze();
+    $('start-date').addEventListener('change', async () => {
+      if (shouldRefetchForCurrentSelection()) {
+        await refetchCurrentChannel('开始日期已变更');
+      } else {
+        analyze();
+      }
     });
 
-    $('end-date').addEventListener('change', () => {
-      analyze();
+    $('end-date').addEventListener('change', async () => {
+      if (shouldRefetchForCurrentSelection()) {
+        await refetchCurrentChannel('结束日期已变更');
+      } else {
+        analyze();
+      }
     });
 
-    $('fetch-channels').addEventListener('click', fetchChannelsOnline);
-    $('run-analysis').addEventListener('click', fetchAndAnalyzeOnline);
+    $('model-filter').addEventListener('change', async () => {
+      if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('模型筛选已变更');
+    });
+
+    $('log-pages').addEventListener('change', async () => {
+      if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('日志页数已变更');
+    });
+
+    $('log-page-size').addEventListener('change', async () => {
+      if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('日志页大小已变更');
+    });
+
+    $('fetch-channels').addEventListener('click', async () => {
+      try {
+        await fetchChannelsOnline();
+      } catch {
+        // The fetch status already contains the actionable error.
+      }
+    });
+    $('run-analysis').addEventListener('click', () => fetchAndAnalyzeOnline());
     $('load-demo').addEventListener('click', setDemoData);
-    $('analyze-manual').addEventListener('click', analyze);
+    $('analyze-manual').addEventListener('click', () => {
+      state.lastFetch = { source: 'manual', type: 'manual', at: new Date().toISOString() };
+      setFetchStatus('已切换到备用 JSON 分析。', 'ok');
+      analyze();
+    });
 
     $('clear-all').addEventListener('click', () => {
       $('base-url').value = 'https://maolaoapi.com';
@@ -2142,6 +2202,7 @@
       const file = event.target.files?.[0];
       if (!file) return;
       $('channel-json').value = await loadFileAsText(file);
+      state.lastFetch = { source: 'manual', type: 'channel-file', at: new Date().toISOString() };
       hydrateChannels();
     });
 
@@ -2149,9 +2210,11 @@
       const file = event.target.files?.[0];
       if (!file) return;
       $('log-json').value = await loadFileAsText(file);
+      state.lastFetch = { source: 'manual', type: 'log-file', at: new Date().toISOString() };
     });
 
     $('channel-json').addEventListener('input', () => {
+      state.lastFetch = { source: 'manual', type: 'channel-input', at: new Date().toISOString() };
       hydrateChannels();
     });
 
