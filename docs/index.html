@@ -284,6 +284,10 @@
       font-size: 12px;
     }
 
+    textarea.secret-header {
+      min-height: 92px;
+    }
+
     .controls {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -293,6 +297,10 @@
 
     .compact-controls {
       grid-template-columns: 160px minmax(180px, 1fr) 180px minmax(220px, 1fr);
+    }
+
+    .workflow-controls {
+      grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
     }
 
     .fetch-status {
@@ -603,7 +611,7 @@
       <div class="panel-head">
         <div>
           <h2>在线拉取</h2>
-          <p class="footnote">使用当前浏览器登录态请求 NewAPI；若接口未开放跨域，需要把此页面部署到同域或使用可信代理。</p>
+          <p class="footnote">按文档 workflow 使用 Cookie 和 New-Api-User 拉取数据；独立页面需要通过可信代理转发 Header。</p>
         </div>
         <div class="actions">
           <button class="btn" id="load-demo" type="button">填充示例</button>
@@ -666,14 +674,29 @@
         <label class="field">
           <span class="label">请求方式</span>
           <select id="fetch-mode">
-            <option value="same-origin">同域直连（自动 Cookie）</option>
+            <option value="workflow-proxy">文档 Workflow（代理转发 Header）</option>
             <option value="direct">跨域直连</option>
+            <option value="same-origin">同域直连（自动 Cookie）</option>
             <option value="proxy">可信代理</option>
           </select>
         </label>
         <label class="field">
           <span class="label">代理地址</span>
-          <input id="proxy-url" type="url" placeholder="可选，自有代理 endpoint">
+          <input id="proxy-url" type="url" placeholder="https://your-worker.example.com">
+        </label>
+      </div>
+
+      <div class="controls workflow-controls">
+        <label class="field">
+          <span class="label">Cookie Header</span>
+          <textarea class="secret-header" id="cookie-header" spellcheck="false" placeholder="session=...; other_cookie=..."></textarea>
+        </label>
+        <label class="field">
+          <span class="label">Workflow 说明</span>
+          <textarea class="secret-header" readonly>1. 登录 NewAPI 后台
+2. 从浏览器 Network 里复制 Cookie 和 New-Api-User
+3. 填写可信代理地址
+4. 点击“拉取渠道”或“拉取并分析”</textarea>
         </label>
       </div>
 
@@ -830,6 +853,7 @@
       const rawBase = $('base-url').value.trim() || 'https://maolaoapi.com';
       const baseUrl = rawBase.replace(/\/+$/, '');
       const apiUser = $('api-user').value.trim();
+      const apiCookie = $('cookie-header').value.trim();
       const proxyUrl = $('proxy-url').value.trim();
       const fetchMode = $('fetch-mode').value;
 
@@ -842,12 +866,23 @@
       if (fetchMode === 'proxy' && !/^https?:\/\//i.test(proxyUrl)) {
         throw new Error('使用可信代理时，需要填写代理地址。');
       }
+      if (fetchMode === 'workflow-proxy') {
+        if (!/^https?:\/\//i.test(proxyUrl)) {
+          throw new Error('文档 Workflow 模式需要填写可信代理地址。');
+        }
+        if (!apiCookie) {
+          throw new Error('文档 Workflow 模式需要填写 Cookie Header。');
+        }
+        if (!apiUser) {
+          throw new Error('文档 Workflow 模式需要填写 New-Api-User。');
+        }
+      }
 
-      return { baseUrl, apiUser, proxyUrl, fetchMode };
+      return { baseUrl, apiUser, apiCookie, proxyUrl, fetchMode };
     }
 
     function getDefaultFetchMode() {
-      return window.location.hostname === 'maolaoapi.com' ? 'same-origin' : 'direct';
+      return window.location.hostname === 'maolaoapi.com' ? 'same-origin' : 'workflow-proxy';
     }
 
     function toUnixSecondFromDate(value, endOfDay = false) {
@@ -875,12 +910,16 @@
       const url = buildApiUrl(path, params);
       const headers = { Accept: 'application/json' };
       if (config.apiUser) headers['New-Api-User'] = config.apiUser;
+      if ((config.fetchMode === 'workflow-proxy' || config.fetchMode === 'proxy') && config.apiCookie) {
+        headers.Cookie = config.apiCookie;
+      }
 
       let response;
-      if (config.fetchMode === 'proxy') {
+      if (config.fetchMode === 'proxy' || config.fetchMode === 'workflow-proxy') {
         response = await fetch(config.proxyUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          credentials: 'omit',
           body: JSON.stringify({ url, method: 'GET', headers }),
         });
       } else {
@@ -907,16 +946,16 @@
       if (config.fetchMode !== 'direct') return;
       const target = new URL(url);
       if (target.origin === window.location.origin) return;
-      setFetchStatus('当前是跨域直连，浏览器通常不会携带 NewAPI 登录 Cookie。建议把页面部署到 NewAPI 同域并选择“同域直连（自动 Cookie）”。', 'error');
+      setFetchStatus('当前是跨域直连，浏览器不能手动携带 Cookie Header。独立在线工具请使用“文档 Workflow（代理转发 Header）”。', 'error');
     }
 
     function formatFetchError(error) {
       const detail = error?.message || String(error);
       if (/HTTP 401|unauthorized|未授权/i.test(detail)) {
-        return `${detail}。接口没有识别到登录态，通常是请求没有携带 NewAPI Cookie。请在 NewAPI 同域访问本工具，并使用“同域直连（自动 Cookie）”。`;
+        return `${detail}。接口没有识别到登录态，请检查 Cookie、New-Api-User 是否来自同一个已登录 NewAPI 账号，且代理已原样转发 Header。`;
       }
       if (/failed to fetch|cors|network/i.test(detail)) {
-        return `${detail}。如果这是跨域限制，请把本工具部署到 NewAPI 同域并使用“同域直连（自动 Cookie）”，或使用可信代理。`;
+        return `${detail}。如果这是跨域限制，请使用“文档 Workflow（代理转发 Header）”，并确认代理允许本站调用。`;
       }
       return detail;
     }
@@ -2193,6 +2232,7 @@
     $('clear-all').addEventListener('click', () => {
       $('base-url').value = 'https://maolaoapi.com';
       $('api-user').value = '';
+      $('cookie-header').value = '';
       $('channel-page-size').value = '100';
       $('log-page-size').value = '100';
       $('log-pages').value = '5';

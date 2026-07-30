@@ -8,7 +8,11 @@
 
 这是一个基于 NewAPI `/api/channel/` 和 `/api/log/` 在线拉取数据的可视化分析页面，用于判断渠道是否值得继续续费或复充。页面会综合成功率、错误率、平均响应时间、额度消耗、模型使用分布、请求量趋势和异常请求，给出 `建议续费`、`谨慎续费`、`暂不续费` 或 `建议更换渠道` 的结论。
 
+独立在线工具使用文档 workflow：从已登录 NewAPI 后台复制 `Cookie` 和 `New-Api-User`，填写到页面中，再通过可信代理转发到 NewAPI。浏览器不能直接设置 `Cookie` 请求头，所以 GitHub Pages 版本需要代理地址才能在线拉取渠道和日志。
+
 页面源码位于 [`docs/index.html`](docs/index.html)，由 GitHub Pages 发布。
+
+Cloudflare Worker 代理示例位于 [`workers/newapi-workflow-proxy.js`](workers/newapi-workflow-proxy.js)，只允许转发 `https://maolaoapi.com/api/channel/` 和 `https://maolaoapi.com/api/log/`。
 
 核心规则：
 
