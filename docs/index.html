@@ -849,11 +849,34 @@
       if (tone) node.classList.add(tone === 'error' ? 'is-error' : 'is-ok');
     }
 
+    function parseWorkflowHeaders(rawCookie, rawApiUser) {
+      let apiUser = rawApiUser.trim();
+      const cookieParts = [];
+
+      for (const rawLine of String(rawCookie || '').split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+
+        const apiUserMatch = line.match(/^new-api-user\s*[:=]\s*(.+)$/i);
+        if (apiUserMatch) {
+          if (!apiUser) apiUser = apiUserMatch[1].trim();
+          continue;
+        }
+
+        const cookieMatch = line.match(/^cookie\s*:\s*(.+)$/i);
+        cookieParts.push(cookieMatch ? cookieMatch[1].trim() : line);
+      }
+
+      const apiCookie = cookieParts.join('; ').replace(/;\s*;/g, ';').replace(/\s+;\s+/g, '; ').trim();
+      return { apiCookie, apiUser };
+    }
+
     function getApiConfig() {
       const rawBase = $('base-url').value.trim() || 'https://maolaoapi.com';
       const baseUrl = rawBase.replace(/\/+$/, '');
-      const apiUser = $('api-user').value.trim();
-      const apiCookie = $('cookie-header').value.trim();
+      const parsedHeaders = parseWorkflowHeaders($('cookie-header').value, $('api-user').value);
+      const apiUser = parsedHeaders.apiUser;
+      const apiCookie = parsedHeaders.apiCookie;
       const proxyUrl = $('proxy-url').value.trim();
       const fetchMode = $('fetch-mode').value;
 
