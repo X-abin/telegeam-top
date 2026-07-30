@@ -14,6 +14,15 @@
 
 Cloudflare Worker 代理示例位于 [`workers/newapi-workflow-proxy.js`](workers/newapi-workflow-proxy.js)，只允许转发 `https://maolaoapi.com/api/channel/` 和 `https://maolaoapi.com/api/log/`。
 
+代理一键部署：
+
+1. 在 Cloudflare 创建 API Token，权限选择 `Account Workers Scripts Edit`。
+2. 在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 添加：
+   - `CLOUDFLARE_API_TOKEN`
+   - `CLOUDFLARE_ACCOUNT_ID`
+3. 到 `Actions -> Deploy NewAPI workflow proxy` 手动运行 workflow。
+4. 部署成功后，把 Worker 地址填到页面的“代理地址”。
+
 核心规则：
 
 - 用户不能通过菜单或命令主动领取兑换码。
