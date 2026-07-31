@@ -5,6 +5,7 @@ import json
 import os
 import ssl
 import subprocess
+import SocketServer
 import threading
 import urlparse
 
@@ -17,6 +18,10 @@ TLS_KEY = os.environ.get('TLS_KEY', '')
 MAX_BODY_BYTES = 1024 * 1024
 ALLOWED_ORIGIN = 'https://maolaoapi.com'
 ALLOWED_PATHS = set(['/api/channel/', '/api/log/'])
+
+
+class ThreadedHTTPServer(SocketServer.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 
 def response_headers(extra=None):
@@ -135,7 +140,7 @@ class ChannelAnalysisHandler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     def make_server(port, certfile='', keyfile=''):
-        server = HTTPServer((HOST, port), ChannelAnalysisHandler)
+        server = ThreadedHTTPServer((HOST, port), ChannelAnalysisHandler)
         if certfile and keyfile:
             server.socket = ssl.wrap_socket(
                 server.socket,
