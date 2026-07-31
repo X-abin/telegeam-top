@@ -907,6 +907,7 @@
     }
 
     const LOG_PAGE_SIZE = 100;
+    const LOG_PAGE_CONCURRENCY = 4;
 
     function isValidProxyUrl(value) {
       return /^https?:\/\//i.test(value) || /^\/[^\s]*$/i.test(value);
@@ -1040,19 +1041,29 @@
 
       const totalPages = Number.isFinite(total) && total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
 
-      for (let page = 2; page <= totalPages; page++) {
-        setFetchStatus(`正在拉取日志：第 ${page}/${totalPages} 页...`);
-        const payload = await requestJson('/api/log/', {
-          p: page,
-          page_size: pageSize,
-          type: 0,
-          channel: finalChannelId,
-          start_timestamp: start,
-          end_timestamp: end,
-          model_name: modelName,
+      for (let page = 2; page <= totalPages; page += LOG_PAGE_CONCURRENCY) {
+        const lastPage = Math.min(totalPages, page + LOG_PAGE_CONCURRENCY - 1);
+        setFetchStatus(`正在拉取日志：第 ${page}-${lastPage} 页 / 共 ${totalPages} 页...`);
+        const pageNumbers = [];
+        for (let cursor = page; cursor <= lastPage; cursor++) pageNumbers.push(cursor);
+        const pageResults = await Promise.all(pageNumbers.map(async (pageNumber) => {
+          const payload = await requestJson('/api/log/', {
+            p: pageNumber,
+            page_size: pageSize,
+            type: 0,
+            channel: finalChannelId,
+            start_timestamp: start,
+            end_timestamp: end,
+            model_name: modelName,
+          });
+          return {
+            page: pageNumber,
+            items: extractItems(payload),
+          };
+        }));
+        pageResults.sort((a, b) => a.page - b.page).forEach((result) => {
+          allItems.push(...result.items);
         });
-        const items = extractItems(payload);
-        allItems.push(...items);
       }
 
       const combined = {
