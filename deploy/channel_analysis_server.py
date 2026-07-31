@@ -3,12 +3,17 @@
 from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
+import ssl
 import subprocess
+import threading
 import urlparse
 
 ROOT = os.environ.get('CHANNEL_ANALYSIS_ROOT', '/opt/channel-analysis')
 HOST = os.environ.get('HOST', '0.0.0.0')
 PORT = int(os.environ.get('PORT', '80'))
+TLS_PORT = int(os.environ.get('TLS_PORT', '0'))
+TLS_CERT = os.environ.get('TLS_CERT', '')
+TLS_KEY = os.environ.get('TLS_KEY', '')
 MAX_BODY_BYTES = 1024 * 1024
 ALLOWED_ORIGIN = 'https://maolaoapi.com'
 ALLOWED_PATHS = set(['/api/channel/', '/api/log/'])
@@ -129,5 +134,22 @@ class ChannelAnalysisHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    server = HTTPServer((HOST, PORT), ChannelAnalysisHandler)
-    server.serve_forever()
+    def make_server(port, certfile='', keyfile=''):
+        server = HTTPServer((HOST, port), ChannelAnalysisHandler)
+        if certfile and keyfile:
+            server.socket = ssl.wrap_socket(
+                server.socket,
+                certfile=certfile,
+                keyfile=keyfile,
+                server_side=True,
+            )
+        return server
+
+    if TLS_PORT and TLS_CERT and TLS_KEY:
+        http_server = make_server(PORT)
+        http_thread = threading.Thread(target=http_server.serve_forever)
+        http_thread.daemon = True
+        http_thread.start()
+        make_server(TLS_PORT, TLS_CERT, TLS_KEY).serve_forever()
+    else:
+        make_server(PORT).serve_forever()
