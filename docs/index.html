@@ -3,14 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" href="data:,">
   <title>channel-renewal-analysis</title>
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f4f7fb;
-      --bg-soft: #e9eef7;
+      --bg: #f6f8fb;
+      --bg-soft: #eef3f8;
       --surface: #ffffff;
       --surface-2: #f8fafc;
+      --surface-3: #eef4f2;
+      --surface-tint: #f1f6ff;
       --text: #102033;
       --muted: #5d6b7f;
       --line: #d7dfeb;
@@ -34,6 +37,8 @@
         --bg-soft: #111a29;
         --surface: #151d2b;
         --surface-2: #101725;
+        --surface-3: #142121;
+        --surface-tint: #121f34;
         --text: #e8eef7;
         --muted: #99a6b8;
         --line: #263244;
@@ -57,7 +62,9 @@
 
     html, body {
       margin: 0;
-      background: radial-gradient(circle at top left, var(--bg-soft), var(--bg) 42%);
+      background:
+        linear-gradient(180deg, color-mix(in srgb, var(--bg-soft) 72%, var(--bg)), var(--bg) 360px),
+        var(--bg);
       color: var(--text);
       font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
     }
@@ -77,15 +84,16 @@
     .app {
       width: min(1480px, calc(100vw - 32px));
       margin: 0 auto;
-      padding: 24px 0 40px;
+      padding: 28px 0 44px;
+      overflow: hidden;
     }
 
     .hero {
       display: grid;
-      grid-template-columns: minmax(0, 1.45fr) minmax(240px, 0.55fr);
+      grid-template-columns: minmax(0, 1.5fr) minmax(260px, 0.5fr);
       gap: 20px;
       align-items: stretch;
-      margin-bottom: 20px;
+      margin-bottom: 22px;
     }
 
     .hero-copy, .hero-score, .panel {
@@ -96,9 +104,9 @@
     }
 
     .hero-copy {
-      padding: 24px;
+      padding: 28px;
       display: grid;
-      gap: 14px;
+      gap: 16px;
     }
 
     .eyebrow {
@@ -114,8 +122,17 @@
     }
 
     h1 {
-      font-size: 28px;
+      font-size: 32px;
       line-height: 1.2;
+    }
+
+    code {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1px 6px;
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 0.92em;
     }
 
     .hero-copy p {
@@ -148,7 +165,7 @@
     }
 
     .hero-score {
-      padding: 24px;
+      padding: 22px;
       display: grid;
       gap: 14px;
       align-content: center;
@@ -193,11 +210,12 @@
 
     .layout {
       display: grid;
-      gap: 20px;
+      gap: 22px;
     }
 
     .panel {
-      padding: 20px;
+      padding: 22px;
+      margin-bottom: 20px;
     }
 
     .panel-head {
@@ -206,11 +224,14 @@
       gap: 16px;
       align-items: center;
       flex-wrap: wrap;
-      margin-bottom: 16px;
+      margin-bottom: 18px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
     }
 
     .panel-head h2 {
-      font-size: 18px;
+      font-size: 20px;
+      margin-bottom: 6px;
     }
 
     .actions {
@@ -224,7 +245,8 @@
       background: var(--surface-2);
       color: var(--text);
       border-radius: 12px;
-      padding: 10px 14px;
+      padding: 11px 15px;
+      min-height: 42px;
       transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
     }
 
@@ -237,6 +259,7 @@
       background: var(--blue);
       color: #fff;
       border-color: transparent;
+      box-shadow: 0 10px 22px color-mix(in srgb, var(--blue) 22%, transparent);
     }
 
     .btn-danger {
@@ -274,6 +297,15 @@
       border-radius: 14px;
       padding: 12px 14px;
       min-width: 0;
+      min-height: 44px;
+    }
+
+    textarea:focus,
+    select:focus,
+    input:focus {
+      outline: 2px solid color-mix(in srgb, var(--blue) 32%, transparent);
+      outline-offset: 2px;
+      border-color: color-mix(in srgb, var(--blue) 42%, var(--line));
     }
 
     textarea {
@@ -292,7 +324,20 @@
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 14px;
-      margin-top: 16px;
+      margin-top: 0;
+    }
+
+    .controls-three {
+      grid-template-columns: minmax(240px, 1.4fr) minmax(180px, 0.8fr) 150px;
+    }
+
+    .controls-four {
+      grid-template-columns: minmax(220px, 1.3fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(180px, 0.9fr);
+    }
+
+    .controls-two {
+      grid-template-columns: minmax(240px, 1fr) minmax(240px, 1fr);
+      margin-top: 14px;
     }
 
     .compact-controls {
@@ -300,11 +345,72 @@
     }
 
     .workflow-controls {
-      grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr);
+      grid-template-columns: minmax(180px, 0.45fr) minmax(360px, 1fr) minmax(260px, 0.75fr);
+      align-items: stretch;
+    }
+
+    .config-board {
+      display: grid;
+      gap: 16px;
+    }
+
+    .config-group {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--surface-2) 84%, var(--surface));
+    }
+
+    .config-title {
+      display: grid;
+      gap: 6px;
+      padding-top: 4px;
+      position: relative;
+    }
+
+    .config-title::before {
+      content: "";
+      width: 28px;
+      height: 3px;
+      border-radius: 999px;
+      background: var(--blue);
+    }
+
+    .config-title h3 {
+      font-size: 15px;
+      font-weight: 500;
+    }
+
+    .config-title span {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .workflow-note {
+      display: grid;
+      gap: 8px;
+      min-height: 92px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: linear-gradient(180deg, var(--surface-3), color-mix(in srgb, var(--surface-3) 72%, var(--surface)));
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .workflow-note strong {
+      color: var(--text);
+      font-weight: 500;
     }
 
     .fetch-status {
-      margin-top: 14px;
+      margin-top: 16px;
       padding: 12px 14px;
       border-radius: 14px;
       border: 1px solid var(--line);
@@ -312,6 +418,7 @@
       color: var(--muted);
       font-size: 13px;
       line-height: 1.5;
+      min-height: 44px;
     }
 
     .fetch-status.is-error {
@@ -351,17 +458,19 @@
     .status-grid {
       display: grid;
       grid-template-columns: repeat(6, minmax(0, 1fr));
-      gap: 14px;
+      gap: 16px;
+      margin-bottom: 20px;
     }
 
     .stat {
-      background: var(--surface-2);
+      background: linear-gradient(180deg, var(--surface), var(--surface-2));
       border: 1px solid var(--line);
       border-radius: 16px;
       padding: 16px;
       display: grid;
       gap: 8px;
       min-height: 112px;
+      box-shadow: 0 10px 24px color-mix(in srgb, var(--text) 5%, transparent);
     }
 
     .stat .label {
@@ -373,6 +482,7 @@
       font-size: 26px;
       font-weight: 500;
       line-height: 1.1;
+      overflow-wrap: anywhere;
     }
 
     .stat .note {
@@ -385,20 +495,30 @@
       display: grid;
       grid-template-columns: 1.4fr 0.9fr;
       gap: 20px;
+      min-width: 0;
+      align-items: start;
+      margin-bottom: 20px;
     }
 
     .stack {
       display: grid;
       gap: 20px;
+      min-width: 0;
     }
 
     .chart-card {
       background: var(--surface);
       border: 1px solid var(--line);
       border-radius: var(--radius);
-      padding: 18px;
+      padding: 20px;
       display: grid;
-      gap: 12px;
+      gap: 14px;
+      box-shadow: 0 14px 30px color-mix(in srgb, var(--text) 5%, transparent);
+      min-width: 0;
+    }
+
+    .chart-card.recommendation {
+      background: linear-gradient(180deg, var(--surface-tint), var(--surface));
     }
 
     .chart-head {
@@ -407,6 +527,11 @@
       align-items: start;
       gap: 16px;
       flex-wrap: wrap;
+      min-width: 0;
+    }
+
+    .chart-head > div {
+      min-width: 0;
     }
 
     .chart-head p {
@@ -419,10 +544,12 @@
     .chart-frame {
       width: 100%;
       overflow: hidden;
+      min-width: 0;
     }
 
     svg {
       width: 100%;
+      max-width: 100%;
       height: auto;
       display: block;
     }
@@ -430,6 +557,7 @@
     .insight-grid {
       display: grid;
       gap: 16px;
+      min-width: 0;
     }
 
     .recommendation {
@@ -439,7 +567,7 @@
 
     .decision {
       display: grid;
-      gap: 8px;
+      gap: 10px;
       padding: 18px;
       border-radius: 18px;
       background: linear-gradient(180deg, var(--surface), var(--surface-2));
@@ -514,6 +642,12 @@
       border: 1px solid var(--line);
       border-radius: 16px;
       background: var(--surface);
+      width: 100%;
+      min-width: 0;
+    }
+
+    #anomaly-table {
+      min-width: 0;
     }
 
     table {
@@ -527,6 +661,7 @@
       border-bottom: 1px solid var(--line);
       text-align: left;
       vertical-align: top;
+      overflow-wrap: anywhere;
     }
 
     th {
@@ -548,6 +683,10 @@
       background: color-mix(in srgb, var(--surface) 80%, transparent);
     }
 
+    .status-grid .empty {
+      grid-column: 1 / -1;
+    }
+
     .footnote {
       color: var(--muted);
       font-size: 12px;
@@ -557,6 +696,20 @@
     @media (max-width: 1120px) {
       .hero, .grid-two {
         grid-template-columns: 1fr;
+      }
+
+      .config-group {
+        grid-template-columns: 1fr;
+      }
+
+      .controls-three,
+      .controls-four,
+      .workflow-controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .workflow-note {
+        grid-column: 1 / -1;
       }
 
       .status-grid {
@@ -570,8 +723,42 @@
         padding: 14px 0 28px;
       }
 
-      .input-grid, .controls, .status-grid {
+      .hero-copy,
+      .hero-score,
+      .panel,
+      .chart-card {
+        border-radius: 16px;
+      }
+
+      .hero-copy,
+      .panel,
+      .chart-card {
+        padding: 16px;
+      }
+
+      h1 {
+        font-size: 28px;
+      }
+
+      .panel-head {
+        align-items: stretch;
+      }
+
+      .actions,
+      .actions .btn {
+        width: 100%;
+      }
+
+      .input-grid, .controls, .status-grid, .config-group {
         grid-template-columns: 1fr;
+      }
+
+      table {
+        min-width: 720px;
+      }
+
+      .workflow-note {
+        grid-column: auto;
       }
 
       .score-ring {
@@ -593,7 +780,7 @@
         <div class="hero-badges">
           <span class="badge"><strong>输入</strong> 接口地址与用户 ID</span>
           <span class="badge"><strong>输出</strong> 指标、图表、建议</span>
-          <span class="badge"><strong>依据</strong> 实时 `data.items[]`</span>
+          <span class="badge"><strong>依据</strong> 实时 <code>data.items[]</code></span>
         </div>
       </div>
       <div class="hero-score">
@@ -621,75 +808,91 @@
         </div>
       </div>
 
-      <div class="controls">
-        <label class="field">
-          <span class="label">Base URL</span>
-          <input id="base-url" type="url" value="https://maolaoapi.com" placeholder="https://maolaoapi.com">
-        </label>
-        <label class="field">
-          <span class="label">New-Api-User</span>
-          <input id="api-user" type="text" inputmode="numeric" placeholder="已登录用户 ID">
-        </label>
-        <label class="field">
-          <span class="label">渠道页大小</span>
-          <input id="channel-page-size" type="number" min="1" max="100" value="100">
-        </label>
-      </div>
+      <div class="config-board">
+        <section class="config-group">
+          <div class="config-title">
+            <h3>连接信息</h3>
+            <span>接口入口与账户标识</span>
+          </div>
+          <div class="controls controls-three">
+            <label class="field">
+              <span class="label">Base URL</span>
+              <input id="base-url" type="url" value="https://maolaoapi.com" placeholder="https://maolaoapi.com">
+            </label>
+            <label class="field">
+              <span class="label">New-Api-User</span>
+              <input id="api-user" type="text" inputmode="numeric" placeholder="已登录用户 ID">
+            </label>
+            <label class="field">
+              <span class="label">渠道页大小</span>
+              <input id="channel-page-size" type="number" min="1" max="100" value="100">
+            </label>
+          </div>
+        </section>
 
-      <div class="controls">
-        <label class="field">
-          <span class="label">渠道选择</span>
-          <select id="channel-select"></select>
-        </label>
-        <label class="field">
-          <span class="label">开始日期</span>
-          <input id="start-date" type="date">
-        </label>
-        <label class="field">
-          <span class="label">结束日期</span>
-          <input id="end-date" type="date">
-        </label>
-        <label class="field">
-          <span class="label">分析口径</span>
-          <select id="analysis-mode">
-            <option value="usage">只看消费与错误日志</option>
-            <option value="all">包含全部日志类型</option>
-          </select>
-        </label>
-      </div>
+        <section class="config-group">
+          <div class="config-title">
+            <h3>分析范围</h3>
+            <span>渠道、时间与日志口径</span>
+          </div>
+          <div class="controls controls-four">
+            <label class="field">
+              <span class="label">渠道选择</span>
+              <select id="channel-select"></select>
+            </label>
+            <label class="field">
+              <span class="label">开始日期</span>
+              <input id="start-date" type="date">
+            </label>
+            <label class="field">
+              <span class="label">结束日期</span>
+              <input id="end-date" type="date">
+            </label>
+            <label class="field">
+              <span class="label">分析口径</span>
+              <select id="analysis-mode">
+                <option value="usage">只看消费与错误日志</option>
+                <option value="all">包含全部日志类型</option>
+              </select>
+            </label>
+          </div>
+          <div class="controls controls-two">
+            <label class="field">
+              <span class="label">日志模型筛选</span>
+              <input id="model-filter" type="text" placeholder="留空表示全部模型">
+            </label>
+            <label class="field">
+              <span class="label">请求方式</span>
+              <select id="fetch-mode">
+                <option value="workflow-proxy">文档 Workflow（代理转发 Header）</option>
+                <option value="direct">跨域直连</option>
+                <option value="same-origin">同域直连（自动 Cookie）</option>
+                <option value="proxy">可信代理</option>
+              </select>
+            </label>
+          </div>
+        </section>
 
-      <div class="controls compact-controls">
-        <label class="field">
-          <span class="label">日志模型筛选</span>
-          <input id="model-filter" type="text" placeholder="留空表示全部模型">
-        </label>
-        <label class="field">
-          <span class="label">请求方式</span>
-          <select id="fetch-mode">
-            <option value="workflow-proxy">文档 Workflow（代理转发 Header）</option>
-            <option value="direct">跨域直连</option>
-            <option value="same-origin">同域直连（自动 Cookie）</option>
-            <option value="proxy">可信代理</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="controls workflow-controls">
-        <label class="field">
-          <span class="label">代理地址</span>
-          <input id="proxy-url" type="url" value="/proxy" placeholder="/proxy">
-        </label>
-        <label class="field">
-          <span class="label">Cookie Header</span>
-          <textarea class="secret-header" id="cookie-header" spellcheck="false" placeholder="session=...; other_cookie=..."></textarea>
-        </label>
-        <label class="field">
-          <span class="label">Workflow 说明</span>
-          <textarea class="secret-header" readonly>1. 登录 NewAPI 后台
-2. 从浏览器 Network 里复制 Cookie 和 New-Api-User
-3. 代理地址默认 /proxy
-4. 点击“拉取渠道”或“拉取并分析”</textarea>
-        </label>
+        <section class="config-group config-group-wide">
+          <div class="config-title">
+            <h3>凭据与代理</h3>
+            <span>默认使用本站 /proxy</span>
+          </div>
+          <div class="controls workflow-controls">
+            <label class="field">
+              <span class="label">代理地址</span>
+              <input id="proxy-url" type="url" value="/proxy" placeholder="/proxy">
+            </label>
+            <label class="field">
+              <span class="label">Cookie Header</span>
+              <textarea class="secret-header" id="cookie-header" spellcheck="false" placeholder="session=...; other_cookie=..."></textarea>
+            </label>
+            <div class="workflow-note">
+              <strong>Workflow</strong>
+              <span>登录 NewAPI 后台，在 Network Headers 中复制 Cookie 和 New-Api-User；代理地址保持 /proxy 即可。</span>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div class="fetch-status" id="fetch-status">等待拉取。</div>
@@ -763,17 +966,17 @@
           </div>
           <div class="chart-frame" id="model-chart"></div>
         </section>
-
-        <section class="chart-card">
-          <div class="chart-head">
-            <div>
-              <h2>异常请求</h2>
-              <p>展示错误、超时、限流、异常耗时等需要重点关注的请求样本。</p>
-            </div>
-          </div>
-          <div id="anomaly-table"></div>
-        </section>
       </div>
+    </section>
+
+    <section class="chart-card">
+      <div class="chart-head">
+        <div>
+          <h2>异常请求</h2>
+          <p>展示错误、超时、限流、异常耗时等需要重点关注的请求样本。</p>
+        </div>
+      </div>
+      <div id="anomaly-table"></div>
     </section>
   </main>
 
@@ -800,6 +1003,11 @@
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
+    }
+
+    function compactText(value, maxLength = 28) {
+      const text = String(value ?? '');
+      return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
     }
 
     function clamp(value, min, max) {
@@ -901,8 +1109,6 @@
     }
 
     function getDefaultProxyUrl() {
-      if (!/^https?:$/i.test(window.location.protocol)) return '';
-      if (/github\.io$/i.test(window.location.hostname)) return '';
       return '/proxy';
     }
 
@@ -2151,9 +2357,11 @@
       const bars = top.map((item, index) => {
         const y = 36 + index * rowHeight;
         const barWidth = (item.count / maxValue) * innerWidth;
+        const label = compactText(item.model, 30);
         return `
           <g>
-            <text x="12" y="${y + 15}" fill="var(--text)" font-size="13">${escapeHtml(item.model)}</text>
+            <title>${escapeHtml(`${item.model}：${fmtInt(item.count)} 次，占比 ${fmtPercent(item.share)}`)}</title>
+            <text x="12" y="${y + 15}" fill="var(--text)" font-size="13">${escapeHtml(label)}</text>
             <rect x="${margin.left}" y="${y}" width="${innerWidth}" height="20" rx="10" fill="var(--line)" opacity="0.55"></rect>
             <rect x="${margin.left}" y="${y}" width="${barWidth}" height="20" rx="10" fill="var(--blue)"></rect>
             <text x="${margin.left + barWidth + 10}" y="${y + 15}" fill="var(--muted)" font-size="13">${fmtInt(item.count)} · ${fmtPercent(item.share)}</text>
