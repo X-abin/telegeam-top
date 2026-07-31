@@ -634,10 +634,6 @@
           <span class="label">渠道页大小</span>
           <input id="channel-page-size" type="number" min="1" max="100" value="100">
         </label>
-        <label class="field">
-          <span class="label">日志页大小</span>
-          <input id="log-page-size" type="number" min="1" max="100" value="100">
-        </label>
       </div>
 
       <div class="controls">
@@ -663,10 +659,6 @@
       </div>
 
       <div class="controls compact-controls">
-        <label class="field">
-          <span class="label">日志页数</span>
-          <input id="log-pages" type="number" min="1" max="20" value="5">
-        </label>
         <label class="field">
           <span class="label">日志模型筛选</span>
           <input id="model-filter" type="text" placeholder="留空表示全部模型">
@@ -914,6 +906,8 @@
       return `${window.location.origin}/proxy`;
     }
 
+    const LOG_PAGE_SIZE = 100;
+
     function isValidProxyUrl(value) {
       return /^https?:\/\//i.test(value) || /^\/[^\s]*$/i.test(value);
     }
@@ -1025,16 +1019,29 @@
         throw new Error('请先拉取渠道列表并选择一个渠道。');
       }
 
-      const pageSize = clamp(Number($('log-page-size').value) || 100, 1, 100);
-      const pages = clamp(Number($('log-pages').value) || 5, 1, 20);
+      const pageSize = LOG_PAGE_SIZE;
       const start = toUnixSecondFromDate($('start-date').value, false);
       const end = toUnixSecondFromDate($('end-date').value, true);
       const modelName = $('model-filter').value.trim();
       const allItems = [];
-      let total = 0;
+      setFetchStatus('正在拉取日志：第 1 页...');
+      const firstPayload = await requestJson('/api/log/', {
+        p: 1,
+        page_size: pageSize,
+        type: 0,
+        channel: finalChannelId,
+        start_timestamp: start,
+        end_timestamp: end,
+        model_name: modelName,
+      });
+      const firstItems = extractItems(firstPayload);
+      const total = Number(firstPayload?.data?.total ?? firstPayload?.total);
+      allItems.push(...firstItems);
 
-      for (let page = 1; page <= pages; page++) {
-        setFetchStatus(`正在拉取日志：第 ${page}/${pages} 页...`);
+      const totalPages = Number.isFinite(total) && total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
+
+      for (let page = 2; page <= totalPages; page++) {
+        setFetchStatus(`正在拉取日志：第 ${page}/${totalPages} 页...`);
         const payload = await requestJson('/api/log/', {
           p: page,
           page_size: pageSize,
@@ -1045,10 +1052,7 @@
           model_name: modelName,
         });
         const items = extractItems(payload);
-        const payloadTotal = Number(payload?.data?.total ?? payload?.total);
-        if (Number.isFinite(payloadTotal)) total = payloadTotal;
         allItems.push(...items);
-        if (items.length < pageSize) break;
       }
 
       const combined = {
@@ -1057,7 +1061,7 @@
         data: {
           page: 1,
           page_size: pageSize,
-          total: total || allItems.length,
+          total: Number.isFinite(total) ? total : allItems.length,
           items: allItems,
         },
       };
@@ -2239,14 +2243,6 @@
       if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('模型筛选已变更');
     });
 
-    $('log-pages').addEventListener('change', async () => {
-      if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('日志页数已变更');
-    });
-
-    $('log-page-size').addEventListener('change', async () => {
-      if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('日志页大小已变更');
-    });
-
     $('fetch-channels').addEventListener('click', async () => {
       try {
         await fetchChannelsOnline();
@@ -2267,8 +2263,6 @@
       $('api-user').value = '';
       $('cookie-header').value = '';
       $('channel-page-size').value = '100';
-      $('log-page-size').value = '100';
-      $('log-pages').value = '5';
       $('model-filter').value = '';
       $('fetch-mode').value = getDefaultFetchMode();
       $('proxy-url').value = getDefaultProxyUrl();
