@@ -907,7 +907,8 @@
     }
 
     const LOG_PAGE_SIZE = 100;
-    const LOG_PAGE_CONCURRENCY = 8;
+    const LOG_PAGE_CONCURRENCY = 4;
+    const RATE_LIMIT_RETRY_DELAYS = [1200, 2500, 5000];
 
     function isValidProxyUrl(value) {
       return /^https?:\/\//i.test(value) || /^\/[^\s]*$/i.test(value);
@@ -970,6 +971,28 @@
       }
     }
 
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function requestJsonWithRetry(path, params = {}, context = '') {
+      for (let attempt = 0; attempt <= RATE_LIMIT_RETRY_DELAYS.length; attempt++) {
+        try {
+          return await requestJson(path, params);
+        } catch (error) {
+          const message = error?.message || String(error);
+          if (!/HTTP 429/i.test(message) || attempt >= RATE_LIMIT_RETRY_DELAYS.length) {
+            throw error;
+          }
+          const delay = RATE_LIMIT_RETRY_DELAYS[attempt];
+          const label = context ? `${context} ` : '';
+          setFetchStatus(`${label}触发限流，${Math.ceil(delay / 1000)} 秒后自动重试...`, 'error');
+          await sleep(delay);
+        }
+      }
+      throw new Error('HTTP 429: 重试后仍被限流。');
+    }
+
     function warnIfCrossOriginWithoutCookie(url, config) {
       if (config.fetchMode !== 'direct') return;
       const target = new URL(url);
@@ -992,12 +1015,12 @@
       try {
         setFetchStatus('正在拉取渠道列表...');
         const pageSize = clamp(Number($('channel-page-size').value) || 100, 1, 100);
-        const payload = await requestJson('/api/channel/', {
+        const payload = await requestJsonWithRetry('/api/channel/', {
           p: 1,
           page_size: pageSize,
           id_sort: false,
           tag_mode: false,
-        });
+        }, '渠道列表');
 
         $('channel-json').value = JSON.stringify(payload, null, 2);
         state.channels = extractItems(payload);
@@ -1026,7 +1049,7 @@
       const modelName = $('model-filter').value.trim();
       const allItems = [];
       setFetchStatus('正在拉取日志：第 1 页...');
-      const firstPayload = await requestJson('/api/log/', {
+      const firstPayload = await requestJsonWithRetry('/api/log/', {
         p: 1,
         page_size: pageSize,
         type: 0,
@@ -1034,7 +1057,7 @@
         start_timestamp: start,
         end_timestamp: end,
         model_name: modelName,
-      });
+      }, '日志第 1 页');
       const firstItems = extractItems(firstPayload);
       const total = Number(firstPayload?.data?.total ?? firstPayload?.total);
       allItems.push(...firstItems);
@@ -1047,7 +1070,7 @@
         const pageNumbers = [];
         for (let cursor = page; cursor <= lastPage; cursor++) pageNumbers.push(cursor);
         const pageResults = await Promise.all(pageNumbers.map(async (pageNumber) => {
-          const payload = await requestJson('/api/log/', {
+          const payload = await requestJsonWithRetry('/api/log/', {
             p: pageNumber,
             page_size: pageSize,
             type: 0,
@@ -1055,7 +1078,7 @@
             start_timestamp: start,
             end_timestamp: end,
             model_name: modelName,
-          });
+          }, `日志第 ${pageNumber} 页`);
           return {
             page: pageNumber,
             items: extractItems(payload),
