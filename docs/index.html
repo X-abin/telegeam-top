@@ -672,13 +672,13 @@
             <option value="proxy">可信代理</option>
           </select>
         </label>
-        <label class="field">
-          <span class="label">代理地址</span>
-          <input id="proxy-url" type="url" placeholder="https://your-worker.example.com">
-        </label>
       </div>
 
       <div class="controls workflow-controls">
+        <label class="field">
+          <span class="label">代理地址</span>
+          <input id="proxy-url" type="url" value="/proxy" placeholder="/proxy">
+        </label>
         <label class="field">
           <span class="label">Cookie Header</span>
           <textarea class="secret-header" id="cookie-header" spellcheck="false" placeholder="session=...; other_cookie=..."></textarea>
@@ -687,7 +687,7 @@
           <span class="label">Workflow 说明</span>
           <textarea class="secret-header" readonly>1. 登录 NewAPI 后台
 2. 从浏览器 Network 里复制 Cookie 和 New-Api-User
-3. 填写可信代理地址
+3. 代理地址默认 /proxy
 4. 点击“拉取渠道”或“拉取并分析”</textarea>
         </label>
       </div>
@@ -869,7 +869,7 @@
       const parsedHeaders = parseWorkflowHeaders($('cookie-header').value, $('api-user').value);
       const apiUser = parsedHeaders.apiUser;
       const apiCookie = parsedHeaders.apiCookie;
-      const proxyUrl = $('proxy-url').value.trim();
+      const proxyUrl = $('proxy-url').value.trim() || getDefaultProxyUrl();
       const fetchMode = $('fetch-mode').value;
 
       if (fetchMode === 'same-origin' && !/^https?:$/i.test(window.location.protocol)) {
@@ -903,7 +903,7 @@
     function getDefaultProxyUrl() {
       if (!/^https?:$/i.test(window.location.protocol)) return '';
       if (/github\.io$/i.test(window.location.hostname)) return '';
-      return `${window.location.origin}/proxy`;
+      return '/proxy';
     }
 
     const LOG_PAGE_SIZE = 100;
