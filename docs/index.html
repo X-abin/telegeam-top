@@ -332,7 +332,7 @@
     }
 
     .controls-four {
-      grid-template-columns: minmax(220px, 1.3fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(180px, 0.9fr);
+      grid-template-columns: minmax(280px, 1.5fr) minmax(150px, 0.7fr) minmax(150px, 0.7fr) minmax(180px, 0.9fr);
     }
 
     .controls-two {
@@ -347,6 +347,23 @@
     .workflow-controls {
       grid-template-columns: minmax(180px, 0.45fr) minmax(360px, 1fr) minmax(260px, 0.75fr);
       align-items: stretch;
+    }
+
+    .channel-picker {
+      gap: 10px;
+    }
+
+    .channel-picker-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.52fr) minmax(150px, 1fr);
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .channel-count {
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
     }
 
     .config-board {
@@ -753,6 +770,10 @@
         grid-template-columns: 1fr;
       }
 
+      .channel-picker-row {
+        grid-template-columns: 1fr;
+      }
+
       table {
         min-width: 720px;
       }
@@ -803,7 +824,7 @@
         <div class="actions">
           <button class="btn" id="load-demo" type="button">填充示例</button>
           <button class="btn" id="fetch-channels" type="button">拉取渠道</button>
-          <button class="btn btn-primary" id="run-analysis" type="button">拉取并分析</button>
+          <button class="btn btn-primary" id="run-analysis" type="button">分析当前渠道</button>
           <button class="btn btn-danger" id="clear-all" type="button">清空</button>
         </div>
       </div>
@@ -836,9 +857,13 @@
             <span>渠道、时间与日志口径</span>
           </div>
           <div class="controls controls-four">
-            <label class="field">
+            <label class="field channel-picker">
               <span class="label">渠道选择</span>
-              <select id="channel-select"></select>
+              <div class="channel-picker-row">
+                <input id="channel-filter" type="text" placeholder="输首字母、名称或 ID">
+                <select id="channel-select"></select>
+              </div>
+              <span class="channel-count" id="channel-count">按首字母自动排序。</span>
             </label>
             <label class="field">
               <span class="label">开始日期</span>
@@ -1008,6 +1033,108 @@
     function compactText(value, maxLength = 28) {
       const text = String(value ?? '');
       return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+    }
+
+    const zhCollator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
+    const pinyinInitials = 'ABCDEFGHJKLMNOPQRSTWXYZ';
+    const pinyinBoundaries = '阿八嚓哒妸发旮哈讥咔垃妈拿噢啪期然撒塌挖昔压匝';
+
+    function getChineseInitial(char) {
+      if (/^[a-z0-9]$/i.test(char)) return char.toUpperCase();
+      if (!/[\u4e00-\u9fff]/.test(char)) return '';
+      for (let index = pinyinBoundaries.length - 1; index >= 0; index--) {
+        if (zhCollator.compare(char, pinyinBoundaries[index]) >= 0) {
+          return pinyinInitials[index] || '';
+        }
+      }
+      return '';
+    }
+
+    function getInitials(value) {
+      return String(value ?? '')
+        .trim()
+        .split('')
+        .map(getChineseInitial)
+        .join('')
+        .toLowerCase();
+    }
+
+    function getChannelLabel(channel) {
+      const status = Number(channel.status) === 1 ? '启用' : '停用';
+      return `${channel.name ?? `渠道 ${channel.id}`} (#${channel.id}, ${status})`;
+    }
+
+    function getChannelSortName(channel) {
+      return String(channel.name ?? `渠道 ${channel.id}`);
+    }
+
+    function sortChannels(channels) {
+      return [...channels].sort((a, b) => {
+        const initialCompare = getInitials(getChannelSortName(a)).localeCompare(getInitials(getChannelSortName(b)));
+        if (initialCompare !== 0) return initialCompare;
+        const nameCompare = zhCollator.compare(getChannelSortName(a), getChannelSortName(b));
+        if (nameCompare !== 0) return nameCompare;
+        return String(a.id).localeCompare(String(b.id), 'zh-Hans-CN', { numeric: true });
+      });
+    }
+
+    function getChannelSearchText(channel) {
+      const label = getChannelLabel(channel);
+      const name = getChannelSortName(channel);
+      return [
+        label,
+        name,
+        getInitials(name),
+        getInitials(label),
+        channel.id,
+        channel.vendor_id,
+        channel.type,
+      ].filter((value) => value != null && value !== '').join(' ').toLowerCase();
+    }
+
+    function getFilteredChannels() {
+      const keyword = $('channel-filter').value.trim().toLowerCase();
+      if (!keyword) return state.channels;
+      return state.channels.filter((channel) => getChannelSearchText(channel).includes(keyword));
+    }
+
+    function renderChannelOptions(preferredId = state.selectedChannelId) {
+      const select = $('channel-select');
+      const count = $('channel-count');
+      const filteredChannels = getFilteredChannels();
+      select.innerHTML = '';
+
+      if (!state.channels.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '暂无渠道';
+        select.appendChild(option);
+        count.textContent = '按首字母自动排序。';
+        state.selectedChannelId = null;
+        return;
+      }
+
+      if (!filteredChannels.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = '没有匹配的渠道';
+        select.appendChild(option);
+        count.textContent = `未找到匹配项，共 ${fmtInt(state.channels.length)} 个渠道。`;
+        return;
+      }
+
+      for (const channel of filteredChannels) {
+        const option = document.createElement('option');
+        option.value = String(channel.id);
+        option.textContent = getChannelLabel(channel);
+        option.dataset.initials = getInitials(getChannelSortName(channel));
+        select.appendChild(option);
+      }
+
+      const preferredExists = preferredId != null && filteredChannels.some((item) => String(item.id) === String(preferredId));
+      state.selectedChannelId = preferredExists ? preferredId : filteredChannels[0].id;
+      select.value = String(state.selectedChannelId);
+      count.textContent = `已按首字母排序，显示 ${fmtInt(filteredChannels.length)} / ${fmtInt(state.channels.length)} 个渠道。`;
     }
 
     function clamp(value, min, max) {
@@ -1240,7 +1367,7 @@
 
         const count = state.channels.length;
         state.lastFetch = { source: 'online', type: 'channels', count, at: new Date().toISOString() };
-        setFetchStatus(`已拉取 ${fmtInt(count)} 个渠道。请选择渠道后点击“拉取并分析”。`, 'ok');
+        setFetchStatus(`已拉取 ${fmtInt(count)} 个渠道。请选择渠道后点击“分析当前渠道”。`, 'ok');
         return state.channels;
       } catch (error) {
         setFetchStatus(`渠道拉取失败：${formatFetchError(error)}`, 'error');
@@ -1312,7 +1439,7 @@
     async function fetchAndAnalyzeOnline(channelId) {
       try {
         if (!state.channels.length) {
-          await fetchChannelsOnline();
+          throw new Error('请先点击“拉取渠道”，再选择渠道进行分析。');
         }
         if (channelId != null && channelId !== '') {
           state.selectedChannelId = String(channelId);
@@ -1329,20 +1456,6 @@
       } catch (error) {
         setFetchStatus(`拉取或分析失败：${formatFetchError(error)}`, 'error');
       }
-    }
-
-    function shouldRefetchForCurrentSelection() {
-      return state.lastFetch?.source === 'online' && state.channels.length > 0;
-    }
-
-    async function refetchCurrentChannel(reason = '渠道选择已变更') {
-      const selected = getSelectedChannel();
-      if (!selected) {
-        setFetchStatus('没有可分析的渠道，请先拉取渠道列表。', 'error');
-        return;
-      }
-      setFetchStatus(`${reason}，正在拉取 ${selected.name || `渠道 ${selected.id}`} 的日志...`);
-      await fetchAndAnalyzeOnline(selected.id);
     }
 
     function safeJsonParse(text) {
@@ -1619,6 +1732,7 @@
       const demo = buildDemoData();
       $('channel-json').value = demo.channelJson;
       $('log-json').value = demo.logJson;
+      $('channel-filter').value = '';
       state.lastFetch = { source: 'demo', type: 'demo', at: new Date().toISOString() };
       hydrateChannels();
       $('start-date').value = '';
@@ -1643,35 +1757,11 @@
 
     function hydrateChannels() {
       try {
-        state.channels = readEndpointPayload($('channel-json').value);
+        state.channels = sortChannels(readEndpointPayload($('channel-json').value));
       } catch {
         state.channels = [];
       }
-
-      const select = $('channel-select');
-      const previous = state.selectedChannelId;
-      select.innerHTML = '';
-
-      if (!state.channels.length) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = '暂无渠道';
-        select.appendChild(option);
-        state.selectedChannelId = null;
-        return;
-      }
-
-      for (const channel of state.channels) {
-        const option = document.createElement('option');
-        option.value = String(channel.id);
-        const status = Number(channel.status) === 1 ? '启用' : '停用';
-        option.textContent = `${channel.name ?? `渠道 ${channel.id}`} (#${channel.id}, ${status})`;
-        select.appendChild(option);
-      }
-
-      const selectedExists = previous != null && state.channels.some((item) => String(item.id) === String(previous));
-      state.selectedChannelId = selectedExists ? previous : state.channels[0].id;
-      select.value = String(state.selectedChannelId);
+      renderChannelOptions(state.selectedChannelId);
     }
 
     function getSelectedChannel() {
@@ -2447,39 +2537,30 @@
 
     $('channel-select').addEventListener('change', async () => {
       state.selectedChannelId = $('channel-select').value;
-      if (shouldRefetchForCurrentSelection()) {
-        await refetchCurrentChannel('渠道选择已变更');
-      } else if (state.logs.length || $('log-json').value.trim()) {
-        analyze();
+      const selected = getSelectedChannel();
+      if (selected) {
+        setFetchStatus(`已选择：${selected.name || `渠道 ${selected.id}`}。需要更新结果时，请点击“分析当前渠道”。`);
       }
     });
 
-    $('analysis-mode').addEventListener('change', async () => {
-      if (shouldRefetchForCurrentSelection()) {
-        await refetchCurrentChannel('分析口径已变更');
-      } else {
-        analyze();
-      }
+    $('channel-filter').addEventListener('input', () => {
+      renderChannelOptions(state.selectedChannelId);
     });
 
-    $('start-date').addEventListener('change', async () => {
-      if (shouldRefetchForCurrentSelection()) {
-        await refetchCurrentChannel('开始日期已变更');
-      } else {
-        analyze();
-      }
+    $('analysis-mode').addEventListener('change', () => {
+      setFetchStatus('分析口径已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
-    $('end-date').addEventListener('change', async () => {
-      if (shouldRefetchForCurrentSelection()) {
-        await refetchCurrentChannel('结束日期已变更');
-      } else {
-        analyze();
-      }
+    $('start-date').addEventListener('change', () => {
+      setFetchStatus('开始日期已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
-    $('model-filter').addEventListener('change', async () => {
-      if (shouldRefetchForCurrentSelection()) await refetchCurrentChannel('模型筛选已变更');
+    $('end-date').addEventListener('change', () => {
+      setFetchStatus('结束日期已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
+    });
+
+    $('model-filter').addEventListener('change', () => {
+      setFetchStatus('模型筛选已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
     $('fetch-channels').addEventListener('click', async () => {
@@ -2502,12 +2583,14 @@
       $('api-user').value = '';
       $('cookie-header').value = '';
       $('channel-page-size').value = '100';
+      $('channel-filter').value = '';
       $('model-filter').value = '';
       $('fetch-mode').value = getDefaultFetchMode();
       $('proxy-url').value = getDefaultProxyUrl();
       $('channel-json').value = '';
       $('log-json').value = '';
       $('channel-select').innerHTML = '<option value="">暂无渠道</option>';
+      $('channel-count').textContent = '按首字母自动排序。';
       setDefaultDateRange();
       state.channels = [];
       state.logs = [];
@@ -2515,6 +2598,7 @@
       state.lastFetch = null;
       setFetchStatus('等待拉取。');
       renderEmpty();
+      renderChannelOptions();
     });
 
     async function loadFileAsText(file) {
@@ -2547,6 +2631,7 @@
     });
 
     renderEmpty();
+    renderChannelOptions();
     $('fetch-mode').value = getDefaultFetchMode();
     $('proxy-url').value = getDefaultProxyUrl();
     setDefaultDateRange();
