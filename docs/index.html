@@ -1240,7 +1240,9 @@
     }
 
     const LOG_PAGE_SIZE = 100;
-    const LOG_PAGE_DELAY_MS = 900;
+    // Keep a small worker pool so multi-page pulls finish quickly without
+    // sending a burst large enough to trigger NewAPI rate limiting.
+    const LOG_PAGE_CONCURRENCY = 3;
     const RATE_LIMIT_RETRY_DELAYS = [3000, 8000, 15000, 30000, 60000];
 
     function isValidProxyUrl(value) {
@@ -1399,24 +1401,44 @@
       }, '日志第 1 页');
       const firstItems = extractItems(firstPayload);
       const total = Number(firstPayload?.data?.total ?? firstPayload?.total);
-      allItems.push(...firstItems);
 
       const totalPages = Number.isFinite(total) && total > 0 ? Math.max(1, Math.ceil(total / pageSize)) : 1;
 
-      for (let page = 2; page <= totalPages; page++) {
-        await sleep(LOG_PAGE_DELAY_MS);
-        setFetchStatus(`正在拉取日志：第 ${page}/${totalPages} 页...`);
-        const payload = await requestJsonWithRetry('/api/log/', {
-          p: page,
-          page_size: pageSize,
-          type: 0,
-          channel: finalChannelId,
-          start_timestamp: start,
-          end_timestamp: end,
-          model_name: modelName,
-        }, `日志第 ${page} 页`);
-        const items = extractItems(payload);
-        allItems.push(...items);
+      if (totalPages > 1) {
+        const pageItems = new Map([[1, firstItems]]);
+        const pendingPages = Array.from({ length: totalPages - 1 }, (_, index) => index + 2);
+        let nextPageIndex = 0;
+        let completedPages = 1;
+        const workerCount = Math.min(LOG_PAGE_CONCURRENCY, pendingPages.length);
+
+        async function fetchLogPage(page) {
+          return requestJsonWithRetry('/api/log/', {
+            p: page,
+            page_size: pageSize,
+            type: 0,
+            channel: finalChannelId,
+            start_timestamp: start,
+            end_timestamp: end,
+            model_name: modelName,
+          }, `日志第 ${page} 页`);
+        }
+
+        async function fetchLogWorker() {
+          while (nextPageIndex < pendingPages.length) {
+            const page = pendingPages[nextPageIndex++];
+            const payload = await fetchLogPage(page);
+            pageItems.set(page, extractItems(payload));
+            completedPages += 1;
+            setFetchStatus(`正在拉取日志：已完成 ${completedPages}/${totalPages} 页...`);
+          }
+        }
+
+        await Promise.all(Array.from({ length: workerCount }, () => fetchLogWorker()));
+        for (let page = 1; page <= totalPages; page++) {
+          allItems.push(...(pageItems.get(page) || []));
+        }
+      } else {
+        allItems.push(...firstItems);
       }
 
       const combined = {
