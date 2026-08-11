@@ -904,7 +904,7 @@
       <div class="panel-head">
         <div>
           <h2>自动筛查：不建议续费渠道</h2>
-          <p class="footnote">按当前日期、模型和分析口径统一扫描全部渠道，优先列出“建议更换渠道”和“暂不续费”。</p>
+          <p class="footnote">按当前日期、模型和分析口径并发抽取每个渠道最近 100 条日志，快速筛出“建议更换渠道”和“暂不续费”。</p>
         </div>
         <div class="actions">
           <button class="btn btn-primary" id="scan-risk-channels" type="button" disabled>开始自动筛查</button>
@@ -1126,6 +1126,7 @@
       riskScanResults: [],
       riskScanCache: new Map(),
       riskScanRunning: false,
+      logDatasetCache: new Map(),
     };
 
     const DEFAULT_API_USER = '5229';
@@ -1137,6 +1138,7 @@
       'rate limit', 'rate-limit', 'quota', 'overload', 'unavailable', '拒绝',
       'invalid', 'connection', 'reset', 'closed', '429', '500', '502', '503'
     ];
+    const logClassificationCache = new WeakMap();
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -1399,9 +1401,11 @@
     }
 
     const LOG_PAGE_SIZE = 100;
-    // Keep a small worker pool so multi-page pulls finish quickly without
-    // sending a burst large enough to trigger NewAPI rate limiting.
-    const LOG_PAGE_CONCURRENCY = 3;
+    const LOG_PAGE_CONCURRENCY = 5;
+    const RISK_SCAN_CONCURRENCY = 4;
+    const RAW_LOG_JSON_LIMIT = 1000;
+    const LOG_CACHE_LIMIT = 8;
+    const LOG_CACHE_TTL_MS = 5 * 60 * 1000;
     const RATE_LIMIT_RETRY_DELAYS = [3000, 8000, 15000, 30000, 60000];
 
     function isValidProxyUrl(value) {
@@ -1481,7 +1485,7 @@
             }
             throw error;
           }
-          const delay = RATE_LIMIT_RETRY_DELAYS[attempt];
+          const delay = RATE_LIMIT_RETRY_DELAYS[attempt] + Math.floor(Math.random() * 900);
           const label = context ? `${context} ` : '';
           setFetchStatus(`${label}触发限流，${Math.ceil(delay / 1000)} 秒后自动重试...`, 'error');
           await sleep(delay);
@@ -1602,6 +1606,46 @@
       };
     }
 
+    function getLogDatasetCacheKey(channelId) {
+      return JSON.stringify([
+        $('base-url').value.trim(),
+        $('api-user').value.trim(),
+        $('fetch-mode').value,
+        $('proxy-url').value.trim(),
+        String(channelId),
+        $('start-date').value,
+        $('end-date').value,
+        $('model-filter').value.trim(),
+      ]);
+    }
+
+    function rememberLogDataset(cacheKey, dataset) {
+      if (state.logDatasetCache.size >= LOG_CACHE_LIMIT) {
+        state.logDatasetCache.delete(state.logDatasetCache.keys().next().value);
+      }
+      state.logDatasetCache.set(cacheKey, { ...dataset, cachedAt: Date.now() });
+    }
+
+    function writeOnlineLogPayload(dataset) {
+      if (dataset.items.length > RAW_LOG_JSON_LIMIT) {
+        $('log-json').value = '';
+        $('log-json').placeholder = `在线日志共 ${fmtInt(dataset.items.length)} 条，已直接用于分析；为避免页面卡顿，不在此处展开完整 JSON。`;
+        return;
+      }
+
+      $('log-json').placeholder = '把 /api/log/ 的返回结果粘贴到这里';
+      $('log-json').value = JSON.stringify({
+        success: true,
+        message: '',
+        data: {
+          page: 1,
+          page_size: LOG_PAGE_SIZE,
+          total: dataset.total,
+          items: dataset.items,
+        },
+      }, null, 2);
+    }
+
     async function fetchLogsOnline(channelId) {
       const selected = getSelectedChannel();
       const finalChannelId = channelId ?? selected?.id;
@@ -1609,23 +1653,22 @@
         throw new Error('请先拉取渠道列表并选择一个渠道。');
       }
 
-      const dataset = await fetchLogDataset(finalChannelId, '日志');
+      const cacheKey = getLogDatasetCacheKey(finalChannelId);
+      let dataset = state.logDatasetCache.get(cacheKey);
+      if (dataset && Date.now() - dataset.cachedAt > LOG_CACHE_TTL_MS) {
+        state.logDatasetCache.delete(cacheKey);
+        dataset = null;
+      }
+      const fromCache = Boolean(dataset);
+      if (!dataset) {
+        dataset = await fetchLogDataset(finalChannelId, '日志');
+        rememberLogDataset(cacheKey, dataset);
+      }
       const allItems = dataset.items;
-
-      const combined = {
-        success: true,
-        message: '',
-        data: {
-          page: 1,
-          page_size: LOG_PAGE_SIZE,
-          total: dataset.total,
-          items: allItems,
-        },
-      };
-      $('log-json').value = JSON.stringify(combined, null, 2);
+      writeOnlineLogPayload(dataset);
       state.logs = allItems;
       state.lastFetch = { source: 'online', type: 'logs', channelId: String(finalChannelId), count: allItems.length, at: new Date().toISOString() };
-      setFetchStatus(`已拉取 ${fmtInt(allItems.length)} 条日志，正在分析...`, 'ok');
+      setFetchStatus(`${fromCache ? '已使用本机缓存' : '已拉取'} ${fmtInt(allItems.length)} 条日志，正在分析...`, 'ok');
       return allItems;
     }
 
@@ -1730,27 +1773,54 @@
 
       state.riskScanRunning = true;
       setRiskScanControls();
-      resetRiskScan('正在拉取当前范围内的全渠道日志...');
+      resetRiskScan('正在并发抽取每个渠道最近 100 条日志...');
 
       try {
         const filter = getAnalysisFilter();
-        const dataset = await fetchLogDataset(null, '全渠道日志');
-        const logsByChannel = new Map();
-        for (const log of dataset.items) {
-          const channelId = getLogChannelId(log);
-          if (channelId == null || channelId === '') continue;
-          const key = String(channelId);
-          if (!logsByChannel.has(key)) logsByChannel.set(key, []);
-          logsByChannel.get(key).push(log);
+        const start = toUnixSecondFromDate($('start-date').value, false);
+        const end = toUnixSecondFromDate($('end-date').value, true);
+        const modelName = $('model-filter').value.trim();
+        const channels = [...state.channels];
+        const allResults = [];
+        let nextChannelIndex = 0;
+        let completedChannels = 0;
+        let sampledLogCount = 0;
+
+        async function scanChannelWorker() {
+          while (nextChannelIndex < channels.length) {
+            const channel = channels[nextChannelIndex++];
+            const payload = await requestJsonWithRetry('/api/log/', {
+              p: 1,
+              page_size: LOG_PAGE_SIZE,
+              type: 0,
+              channel: channel.id,
+              start_timestamp: start,
+              end_timestamp: end,
+              model_name: modelName,
+            }, `渠道 ${channel.name || channel.id}`);
+            const channelLogs = extractItems(payload);
+            const total = Number(payload?.data?.total ?? payload?.total);
+            const filteredLogs = filterLogsForAnalysis(channelLogs, channel.id, filter);
+            const metrics = analyzeChannel(channel, filteredLogs);
+            const totalLogCount = Number.isFinite(total) ? total : channelLogs.length;
+            state.riskScanCache.set(String(channel.id), { channel, logs: channelLogs, metrics, total: totalLogCount });
+            allResults.push({ channel, metrics });
+            sampledLogCount += channelLogs.length;
+            completedChannels += 1;
+            setFetchStatus(`快速筛查：已完成 ${completedChannels}/${channels.length} 个渠道...`);
+
+            if (totalLogCount <= channelLogs.length) {
+              rememberLogDataset(getLogDatasetCacheKey(channel.id), {
+                items: channelLogs,
+                total: totalLogCount,
+                totalPages: 1,
+              });
+            }
+          }
         }
 
-        const allResults = state.channels.map((channel) => {
-          const channelLogs = logsByChannel.get(String(channel.id)) || [];
-          const filteredLogs = filterLogsForAnalysis(channelLogs, channel.id, filter);
-          const metrics = analyzeChannel(channel, filteredLogs);
-          state.riskScanCache.set(String(channel.id), { channel, logs: channelLogs, metrics });
-          return { channel, metrics };
-        });
+        const workerCount = Math.min(RISK_SCAN_CONCURRENCY, channels.length);
+        await Promise.all(Array.from({ length: workerCount }, () => scanChannelWorker()));
 
         const riskLabels = new Set(['暂不续费', '建议更换渠道']);
         const priority = { '建议更换渠道': 0, '暂不续费': 1 };
@@ -1762,8 +1832,8 @@
             return a.metrics.overallScore - b.metrics.overallScore;
           });
 
-        renderRiskScanResults(state.riskScanResults, state.channels.length, dataset.items.length);
-        setFetchStatus(`自动筛查完成：扫描 ${fmtInt(state.channels.length)} 个渠道，发现 ${fmtInt(state.riskScanResults.length)} 个不建议续费渠道。`, 'ok');
+        renderRiskScanResults(state.riskScanResults, channels.length, sampledLogCount);
+        setFetchStatus(`快速筛查完成：扫描 ${fmtInt(channels.length)} 个渠道，抽取 ${fmtInt(sampledLogCount)} 条日志，发现 ${fmtInt(state.riskScanResults.length)} 个不建议续费渠道。`, 'ok');
       } catch (error) {
         resetRiskScan(`自动筛查失败：${formatFetchError(error)}`);
         setFetchStatus(`自动筛查失败：${formatFetchError(error)}`, 'error');
@@ -1787,7 +1857,10 @@
         data: { page: 1, page_size: LOG_PAGE_SIZE, total: cached.logs.length, items: cached.logs },
       }, null, 2);
       renderAll(cached.channel, cached.metrics);
-      setFetchStatus(`已打开自动筛查结果：${cached.channel.name || `渠道 ${cached.channel.id}`}。`, 'ok');
+      const sampleNote = Number.isFinite(cached.total) && cached.total > cached.logs.length
+        ? `当前展示最近 ${fmtInt(cached.logs.length)} / ${fmtInt(cached.total)} 条抽样日志；点击“分析当前渠道”可拉取完整日志。`
+        : `当前展示 ${fmtInt(cached.logs.length)} 条日志。`;
+      setFetchStatus(`已打开自动筛查结果：${cached.channel.name || `渠道 ${cached.channel.id}`}。${sampleNote}`, 'ok');
       $('status-grid').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
@@ -1847,6 +1920,9 @@
     }
 
     function classifyLog(log) {
+      if (log && typeof log === 'object' && logClassificationCache.has(log)) {
+        return logClassificationCache.get(log);
+      }
       const type = Number(log.type);
       const content = String(log.content ?? '').toLowerCase();
       const errorSignal = type === 5 || errorKeywords.some((keyword) => content.includes(keyword));
@@ -1855,7 +1931,9 @@
         log.quota != null || log.use_time != null || log.model_name || log.model
       ));
       const requestSignal = usageSignal || errorSignal;
-      return { errorSignal, refundSignal, usageSignal, requestSignal };
+      const result = { errorSignal, refundSignal, usageSignal, requestSignal };
+      if (log && typeof log === 'object') logClassificationCache.set(log, result);
+      return result;
     }
 
     function buildDemoData() {
@@ -2929,7 +3007,10 @@
       if (button) showRiskChannel(button.dataset.riskChannelId);
     });
     for (const id of ['base-url', 'api-user', 'proxy-url', 'cookie-header', 'fetch-mode']) {
-      $(id).addEventListener('change', saveConnectionConfig);
+      $(id).addEventListener('change', () => {
+        state.logDatasetCache = new Map();
+        saveConnectionConfig();
+      });
     }
     $('remember-connection').addEventListener('change', () => {
       if ($('remember-connection').checked) saveConnectionConfig();
@@ -2963,6 +3044,7 @@
       state.selectedChannelId = null;
       state.lastFetch = null;
       state.riskScanRunning = false;
+      state.logDatasetCache = new Map();
       resetRiskScan();
       setFetchStatus('等待拉取。');
       renderEmpty();
