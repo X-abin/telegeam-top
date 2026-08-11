@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+0 0 * * * root /usr/bin/python /opt/channel-analysis/daily_channel_report.py >> /var/log/channel-analysis-daily.log 2>&1

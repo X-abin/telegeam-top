@@ -11,11 +11,16 @@ import os
 import random
 import subprocess
 import sys
+import threading
 import time
 try:
     from urllib import urlencode
 except ImportError:
     from urllib.parse import urlencode
+try:
+    import Queue as queue
+except ImportError:
+    import queue
 
 
 ROOT = os.environ.get('CHANNEL_ANALYSIS_ROOT', '/opt/channel-analysis')
@@ -24,6 +29,9 @@ REPORT_DIR = os.environ.get('CHANNEL_REPORT_DIR', os.path.join(ROOT, 'daily'))
 LOCK_PATH = os.path.join(ROOT, '.daily-report.lock')
 PAGE_SIZE = 100
 PAGE_DELAY_SECONDS = 0.45
+LOG_PAGE_CONCURRENCY = 2
+CHANNEL_REPORT_CONCURRENCY = 3
+MIN_REQUEST_INTERVAL_SECONDS = 1.1
 RETRY_DELAYS = [5, 15, 30, 60, 120]
 ERROR_KEYWORDS = [
     u'error', u'fail', u'failed', u'timeout', u'timed out', u'超时', u'失败', u'错误',
@@ -83,6 +91,15 @@ class ApiClient(object):
         self.base_url = base_url.rstrip('/')
         self.api_user = api_user
         self.cookie = cookie
+        self.throttle_lock = threading.Lock()
+        self.next_request_at = 0.0
+
+    def wait_for_request_slot(self):
+        with self.throttle_lock:
+            delay = self.next_request_at - time.time()
+            if delay > 0:
+                time.sleep(delay)
+            self.next_request_at = time.time() + MIN_REQUEST_INTERVAL_SECONDS
 
     def request_json(self, path, params, label):
         query = urlencode([(key, value) for key, value in params.items() if value not in (None, '')])
@@ -96,6 +113,7 @@ class ApiClient(object):
             url,
         ]
         for attempt in range(len(RETRY_DELAYS) + 1):
+            self.wait_for_request_slot()
             try:
                 output = subprocess.check_output(command, stderr=subprocess.STDOUT)
             except subprocess.CalledProcessError as error:
@@ -112,31 +130,89 @@ class ApiClient(object):
             if status == 429 and attempt < len(RETRY_DELAYS):
                 delay = RETRY_DELAYS[attempt] + random.random()
                 print('%s rate limited; retrying in %.1fs' % (label, delay))
+                sys.stdout.flush()
                 time.sleep(delay)
                 continue
             detail = body.decode('utf-8', 'replace')[:300]
             raise RuntimeError('%s failed with HTTP %s: %s' % (label, status, detail.encode('utf-8')))
         raise RuntimeError('%s failed after retries' % label)
 
-    def fetch_all(self, path, params, label):
+    def fetch_all(self, path, params, label, concurrency=1):
         first_params = dict(params)
         first_params.update({'p': 1, 'page_size': PAGE_SIZE})
         first_payload = self.request_json(path, first_params, '%s page 1' % label)
         items = extract_items(first_payload)
         total = extract_total(first_payload, len(items))
         total_pages = max(1, int(math.ceil(float(total) / PAGE_SIZE))) if total else 1
-        page = 2
-        while page <= total_pages:
-            time.sleep(PAGE_DELAY_SECONDS)
-            page_params = dict(params)
-            page_params.update({'p': page, 'page_size': PAGE_SIZE})
-            payload = self.request_json(path, page_params, '%s page %s' % (label, page))
-            page_items = extract_items(payload)
-            items.extend(page_items)
-            if not page_items:
-                break
-            page += 1
+        if total_pages <= 1:
+            return items, total
+
+        if concurrency <= 1:
+            page = 2
+            while page <= total_pages:
+                time.sleep(PAGE_DELAY_SECONDS)
+                page_params = dict(params)
+                page_params.update({'p': page, 'page_size': PAGE_SIZE})
+                payload = self.request_json(path, page_params, '%s page %s' % (label, page))
+                page_items = extract_items(payload)
+                items.extend(page_items)
+                if not page_items:
+                    break
+                page += 1
+            return items, total
+
+        pending = queue.Queue()
+        for page in range(2, total_pages + 1):
+            pending.put(page)
+        page_results = {}
+        errors = []
+        state_lock = threading.Lock()
+        completed = [1]
+
+        def worker():
+            while not errors:
+                try:
+                    page = pending.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    page_params = dict(params)
+                    page_params.update({'p': page, 'page_size': PAGE_SIZE})
+                    payload = self.request_json(path, page_params, '%s page %s' % (label, page))
+                    with state_lock:
+                        page_results[page] = extract_items(payload)
+                        completed[0] += 1
+                        if completed[0] % 20 == 0 or completed[0] == total_pages:
+                            print('%s progress: %s/%s pages' % (label, completed[0], total_pages))
+                            sys.stdout.flush()
+                except Exception as error:
+                    with state_lock:
+                        errors.append(error)
+                    return
+                finally:
+                    pending.task_done()
+                time.sleep(PAGE_DELAY_SECONDS)
+
+        workers = []
+        for unused in range(min(concurrency, total_pages - 1)):
+            thread = threading.Thread(target=worker)
+            thread.daemon = True
+            thread.start()
+            workers.append(thread)
+        for thread in workers:
+            thread.join()
+        if errors:
+            raise errors[0]
+        for page in range(2, total_pages + 1):
+            items.extend(page_results.get(page, []))
         return items, total
+
+    def fetch_first(self, path, params, label):
+        page_params = dict(params)
+        page_params.update({'p': 1, 'page_size': PAGE_SIZE})
+        payload = self.request_json(path, page_params, label)
+        items = extract_items(payload)
+        return items, extract_total(payload, len(items))
 
 
 def number(value, default=0.0):
@@ -271,7 +347,7 @@ def recommendation(score, request_count, success_rate, error_rate, average_laten
     return u'暂不续费', u'orange', u'当前性价比一般，先观察再决定。'
 
 
-def analyze_channel(channel, logs):
+def analyze_channel(channel, logs, totals=None):
     request_logs = []
     success_logs = []
     error_logs = []
@@ -287,30 +363,35 @@ def analyze_channel(channel, logs):
         elif usage_signal:
             success_logs.append(log)
 
-    request_count = len(success_logs) + len(error_logs)
-    success_count = len(success_logs)
-    error_count = len(error_logs)
+    sample_success_count = len(success_logs)
+    sample_error_count = len(error_logs)
+    success_count = integer(totals.get('success')) if totals else sample_success_count
+    error_count = integer(totals.get('error')) if totals else sample_error_count
+    refund_count = integer(totals.get('refund')) if totals else refund_count
+    request_count = success_count + error_count
     success_rate = float(success_count) / request_count if request_count else None
     error_rate = float(error_count) / request_count if request_count else None
     latencies = [number(log.get('use_time')) for log in success_logs if number(log.get('use_time')) > 0]
     average_latency = sum(latencies) / len(latencies) if latencies else None
     p95_latency = percentile(latencies, 0.95)
-    total_quota = sum(number(log.get('quota')) for log in success_logs)
-    quota_per_success = total_quota / success_count if success_count else None
+    sample_total_quota = sum(number(log.get('quota')) for log in success_logs)
+    quota_per_success = sample_total_quota / sample_success_count if sample_success_count else None
+    total_quota = quota_per_success * success_count if quota_per_success is not None else 0
     token_total = sum(number(log.get('prompt_tokens')) + number(log.get('completion_tokens')) for log in success_logs)
-    quota_per_thousand = total_quota / token_total * 1000 if token_total else None
+    quota_per_thousand = sample_total_quota / token_total * 1000 if token_total else None
 
     model_counts = collections.Counter((log.get('model_name') or log.get('model') or u'unknown') for log in success_logs)
     entropy = 0.0
-    if success_count and len(model_counts) > 1:
+    if sample_success_count and len(model_counts) > 1:
         for count in model_counts.values():
-            probability = float(count) / success_count
+            probability = float(count) / sample_success_count
             entropy -= probability * math.log(probability)
         entropy /= math.log(len(model_counts))
 
     baseline = number(channel.get('response_time'), 0.0)
     slow_threshold = max(4000.0, (p95_latency or 0) * 1.5, baseline * 3)
     anomaly_count = 0
+    slow_success_sample = 0
     error_reasons = collections.Counter()
     for log in request_logs:
         error_signal = classify(log)[0]
@@ -322,6 +403,8 @@ def analyze_channel(channel, logs):
         slow = latency >= slow_threshold if latency > 0 else False
         if error_signal or slow:
             anomaly_count += 1
+        if slow and not error_signal:
+            slow_success_sample += 1
         if u'429' in lower or u'rate limit' in lower or u'限流' in lower:
             error_reasons[u'限流'] += 1
         elif u'timeout' in lower or u'超时' in lower:
@@ -330,6 +413,10 @@ def analyze_channel(channel, logs):
             error_reasons[u'连接异常'] += 1
         elif error_signal:
             error_reasons[u'其他错误'] += 1
+    if totals:
+        slow_rate = float(slow_success_sample) / sample_success_count if sample_success_count else 0
+        estimated_slow_count = int(round(slow_rate * success_count))
+        anomaly_count = min(request_count, error_count + estimated_slow_count)
     anomaly_rate = float(anomaly_count) / request_count if request_count else None
 
     success_score = score_success(success_rate)
@@ -371,6 +458,8 @@ def analyze_channel(channel, logs):
         'anomaly_rate': round(anomaly_rate, 6) if anomaly_rate is not None else None,
         'top_models': top_models,
         'error_reasons': reasons,
+        'sample_count': len(logs),
+        'is_sampled': bool(totals),
     }
 
 
@@ -413,24 +502,76 @@ def main():
         'id_sort': 'false',
         'tag_mode': 'false',
     }, 'channels')
-    logs, log_total = client.fetch_all('/api/log/', {
-        'type': 0,
-        'start_timestamp': start_timestamp,
-        'end_timestamp': end_timestamp,
-    }, 'logs')
+    pending_channels = queue.Queue()
+    for channel in channels:
+        pending_channels.put(channel)
+    results = []
+    errors = []
+    state_lock = threading.Lock()
+    completed = [0]
 
-    logs_by_channel = collections.defaultdict(list)
-    for log in logs:
-        channel_id = log.get('channel', log.get('channel_id', log.get('channelId')))
-        if channel_id is not None:
-            logs_by_channel[text_type(channel_id)].append(log)
+    def channel_worker():
+        while not errors:
+            try:
+                channel = pending_channels.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                common_params = {
+                    'channel': channel.get('id'),
+                    'start_timestamp': start_timestamp,
+                    'end_timestamp': end_timestamp,
+                }
+                usage_params = dict(common_params)
+                usage_params['type'] = 2
+                usage_logs, usage_total = client.fetch_first(
+                    '/api/log/', usage_params, 'channel %s usage' % channel.get('id'))
+                time.sleep(0.15)
+                error_params = dict(common_params)
+                error_params['type'] = 5
+                error_logs, error_total = client.fetch_first(
+                    '/api/log/', error_params, 'channel %s errors' % channel.get('id'))
+                time.sleep(0.15)
+                refund_params = dict(common_params)
+                refund_params['type'] = 6
+                refund_logs, refund_total = client.fetch_first(
+                    '/api/log/', refund_params, 'channel %s refunds' % channel.get('id'))
+                result = analyze_channel(channel, usage_logs + error_logs + refund_logs, {
+                    'success': usage_total,
+                    'error': error_total,
+                    'refund': refund_total,
+                })
+                with state_lock:
+                    results.append(result)
+                    completed[0] += 1
+                    if completed[0] % 5 == 0 or completed[0] == len(channels):
+                        print('channel progress: %s/%s' % (completed[0], len(channels)))
+                        sys.stdout.flush()
+            except Exception as error:
+                with state_lock:
+                    errors.append(error)
+                return
+            finally:
+                pending_channels.task_done()
 
-    results = [analyze_channel(channel, logs_by_channel[text_type(channel.get('id'))]) for channel in channels]
+    workers = []
+    for unused in range(min(CHANNEL_REPORT_CONCURRENCY, len(channels))):
+        thread = threading.Thread(target=channel_worker)
+        thread.daemon = True
+        thread.start()
+        workers.append(thread)
+    for thread in workers:
+        thread.join()
+    if errors:
+        raise errors[0]
+
     priority = {u'建议更换渠道': 0, u'暂不续费': 1, u'谨慎续费': 2, u'建议续费': 3}
     results.sort(key=lambda item: (priority.get(item['recommendation'], 9), item['score'], item['name']))
     request_count = sum(item['request_count'] for item in results)
     success_count = sum(item['success_count'] for item in results)
     error_count = sum(item['error_count'] for item in results)
+    refund_count = sum(item['refund_count'] for item in results)
+    sampled_log_count = sum(item['sample_count'] for item in results)
     payload = {
         'version': 1,
         'report_date': report_date.isoformat(),
@@ -439,13 +580,15 @@ def main():
         'summary': {
             'channel_count': len(results),
             'source_channel_count': channel_total,
-            'source_log_count': log_total,
+            'source_log_count': request_count + refund_count,
+            'sampled_log_count': sampled_log_count,
             'request_count': request_count,
             'success_count': success_count,
             'error_count': error_count,
             'success_rate': round(float(success_count) / request_count, 6) if request_count else None,
             'replace_count': sum(1 for item in results if item['recommendation'] == u'建议更换渠道'),
             'pause_count': sum(1 for item in results if item['recommendation'] == u'暂不续费'),
+            'metric_mode': 'exact_counts_sampled_performance',
         },
         'channels': results,
     }
@@ -453,7 +596,8 @@ def main():
     latest_path = os.path.join(REPORT_DIR, 'latest.json')
     write_json_atomic(archive_path, payload)
     write_json_atomic(latest_path, payload)
-    print('daily report generated: %s channels, %s logs, %s requests' % (len(results), len(logs), request_count))
+    print('daily report generated: %s channels, %s sampled logs, %s requests' % (
+        len(results), sampled_log_count, request_count))
     return 0
 
 

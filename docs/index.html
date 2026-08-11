@@ -925,7 +925,7 @@
       <div class="panel-head">
         <div>
           <h2>昨日渠道效果日报</h2>
-          <p class="footnote" id="daily-report-meta">每天北京时间 00:00 自动统计前一天全部渠道。</p>
+          <p class="footnote" id="daily-report-meta">每天北京时间 00:00 自动统计；请求量为精确值，延迟与额度基于每渠道样本。</p>
         </div>
         <div class="actions">
           <button class="btn" id="refresh-daily-report" type="button">刷新日报</button>
@@ -1354,8 +1354,8 @@
       $('daily-replace-count').textContent = fmtInt(reportNumber(summary.replace_count));
       $('daily-pause-count').textContent = fmtInt(reportNumber(summary.pause_count));
       $('daily-report-meta').textContent = report?.generated_at
-        ? `统计日期 ${report.report_date}，生成时间 ${String(report.generated_at).replace('T', ' ')}`
-        : '每天北京时间 00:00 自动统计前一天全部渠道。';
+        ? `统计日期 ${report.report_date}，生成时间 ${String(report.generated_at).replace('T', ' ')}；请求量为精确值，延迟与额度为样本统计。`
+        : '每天北京时间 00:00 自动统计；请求量为精确值，延迟与额度基于每渠道样本。';
 
       if (!channels.length) {
         $('daily-results').innerHTML = '<div class="empty">该日报没有可展示的渠道数据。</div>';
@@ -1417,7 +1417,7 @@
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         renderDailyReport(await response.json());
       } catch (error) {
-        $('daily-report-meta').textContent = '每天北京时间 00:00 自动统计前一天全部渠道。';
+        $('daily-report-meta').textContent = '每天北京时间 00:00 自动统计；请求量为精确值，延迟与额度基于每渠道样本。';
         $('daily-results').innerHTML = `<div class="empty">最新日报暂不可用：${escapeHtml(error?.message || String(error))}</div>`;
       } finally {
         button.disabled = false;
