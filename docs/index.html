@@ -218,6 +218,77 @@
       margin-bottom: 20px;
     }
 
+    .risk-panel {
+      margin-bottom: 20px;
+      padding: 0;
+      overflow: hidden;
+      border-color: color-mix(in srgb, var(--orange) 28%, var(--line));
+    }
+
+    .risk-panel .panel-head {
+      margin: 0;
+      padding: 20px 22px;
+      background: color-mix(in srgb, var(--orange-soft) 52%, var(--surface));
+    }
+
+    .risk-summary {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+      padding: 14px 22px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
+    }
+
+    .risk-summary-item {
+      display: grid;
+      grid-template-columns: auto auto;
+      align-items: baseline;
+      gap: 7px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .risk-summary-item strong {
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .risk-results {
+      padding: 16px 22px 20px;
+    }
+
+    .risk-results .table-wrap {
+      border-radius: 8px;
+    }
+
+    .risk-channel-button {
+      border: 0;
+      padding: 0;
+      background: transparent;
+      color: var(--blue);
+      font-weight: 600;
+      text-align: left;
+    }
+
+    .risk-channel-button:hover {
+      text-decoration: underline;
+    }
+
+    .risk-reason {
+      color: var(--muted);
+      min-width: 220px;
+      line-height: 1.45;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+      transform: none;
+    }
+
     .panel-head {
       display: flex;
       justify-content: space-between;
@@ -424,6 +495,20 @@
     .workflow-note strong {
       color: var(--text);
       font-weight: 500;
+    }
+
+    .remember-option {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    .remember-option input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--blue);
     }
 
     .fetch-status {
@@ -815,6 +900,27 @@
       </div>
     </section>
 
+    <section class="panel risk-panel" id="risk-panel">
+      <div class="panel-head">
+        <div>
+          <h2>自动筛查：不建议续费渠道</h2>
+          <p class="footnote">按当前日期、模型和分析口径统一扫描全部渠道，优先列出“建议更换渠道”和“暂不续费”。</p>
+        </div>
+        <div class="actions">
+          <button class="btn btn-primary" id="scan-risk-channels" type="button" disabled>开始自动筛查</button>
+        </div>
+      </div>
+      <div class="risk-summary" aria-live="polite">
+        <div class="risk-summary-item"><span>已扫描</span><strong id="risk-scanned-count">0</strong></div>
+        <div class="risk-summary-item"><span>建议更换</span><strong id="risk-replace-count">0</strong></div>
+        <div class="risk-summary-item"><span>暂不续费</span><strong id="risk-pause-count">0</strong></div>
+        <div class="risk-summary-item"><span>日志样本</span><strong id="risk-log-count">0</strong></div>
+      </div>
+      <div class="risk-results" id="risk-results">
+        <div class="empty">先拉取渠道列表，再开始自动筛查。</div>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <div>
@@ -842,7 +948,7 @@
             </label>
             <label class="field">
               <span class="label">New-Api-User</span>
-              <input id="api-user" type="text" inputmode="numeric" placeholder="已登录用户 ID">
+              <input id="api-user" type="text" inputmode="numeric" value="5229" placeholder="已登录用户 ID">
             </label>
             <label class="field">
               <span class="label">渠道页大小</span>
@@ -906,15 +1012,19 @@
           <div class="controls workflow-controls">
             <label class="field">
               <span class="label">代理地址</span>
-              <input id="proxy-url" type="url" value="/proxy" placeholder="/proxy">
+              <input id="proxy-url" type="url" value="https://bin.nu11.me/proxy" placeholder="https://bin.nu11.me/proxy">
             </label>
             <label class="field">
               <span class="label">Cookie Header</span>
-              <textarea class="secret-header" id="cookie-header" spellcheck="false" placeholder="session=...; other_cookie=..."></textarea>
+              <textarea class="secret-header" id="cookie-header" spellcheck="false" placeholder="粘贴完整 Cookie Header"></textarea>
             </label>
             <div class="workflow-note">
               <strong>Workflow</strong>
-              <span>登录 NewAPI 后台，在 Network Headers 中复制 Cookie 和 New-Api-User；代理地址保持 /proxy 即可。</span>
+              <span>代理地址和用户 ID 已预填；Cookie 首次填写后只保存在当前浏览器，后续会自动恢复。</span>
+              <label class="remember-option">
+                <input id="remember-connection" type="checkbox" checked>
+                <span>在当前浏览器记住连接信息</span>
+              </label>
             </div>
           </div>
         </section>
@@ -1013,7 +1123,14 @@
       selectedChannelId: null,
       analysisMode: 'usage',
       lastFetch: null,
+      riskScanResults: [],
+      riskScanCache: new Map(),
+      riskScanRunning: false,
     };
+
+    const DEFAULT_API_USER = '5229';
+    const DEFAULT_PROXY_URL = 'https://bin.nu11.me/proxy';
+    const CONNECTION_STORAGE_KEY = 'channel-renewal-analysis.connection.v1';
 
     const errorKeywords = [
       'error', 'fail', 'failed', 'timeout', 'timed out', '超时', '失败', '错误',
@@ -1198,6 +1315,47 @@
       return { apiCookie, apiUser };
     }
 
+    function saveConnectionConfig() {
+      try {
+        if (!$('remember-connection').checked) {
+          window.localStorage.removeItem(CONNECTION_STORAGE_KEY);
+          return;
+        }
+        window.localStorage.setItem(CONNECTION_STORAGE_KEY, JSON.stringify({
+          baseUrl: $('base-url').value.trim(),
+          apiUser: $('api-user').value.trim(),
+          proxyUrl: $('proxy-url').value.trim(),
+          fetchMode: $('fetch-mode').value,
+          cookieHeader: $('cookie-header').value,
+        }));
+      } catch {
+        // Some privacy modes disable local storage; online fetching still works.
+      }
+    }
+
+    function restoreConnectionConfig() {
+      try {
+        const saved = JSON.parse(window.localStorage.getItem(CONNECTION_STORAGE_KEY) || 'null');
+        if (!saved || typeof saved !== 'object') return;
+        if (saved.baseUrl) $('base-url').value = saved.baseUrl;
+        if (saved.apiUser) $('api-user').value = saved.apiUser;
+        if (saved.proxyUrl) $('proxy-url').value = saved.proxyUrl;
+        if (saved.fetchMode) $('fetch-mode').value = saved.fetchMode;
+        if (saved.cookieHeader) $('cookie-header').value = saved.cookieHeader;
+        $('remember-connection').checked = true;
+      } catch {
+        // Ignore invalid or unavailable browser storage.
+      }
+    }
+
+    function clearSavedConnectionConfig() {
+      try {
+        window.localStorage.removeItem(CONNECTION_STORAGE_KEY);
+      } catch {
+        // Ignore unavailable browser storage.
+      }
+    }
+
     function getApiConfig() {
       const rawBase = $('base-url').value.trim() || 'https://maolaoapi.com';
       const baseUrl = rawBase.replace(/\/+$/, '');
@@ -1228,6 +1386,7 @@
         }
       }
 
+      saveConnectionConfig();
       return { baseUrl, apiUser, apiCookie, proxyUrl, fetchMode };
     }
 
@@ -1236,7 +1395,7 @@
     }
 
     function getDefaultProxyUrl() {
-      return '/proxy';
+      return DEFAULT_PROXY_URL;
     }
 
     const LOG_PAGE_SIZE = 100;
@@ -1366,10 +1525,11 @@
         $('channel-json').value = JSON.stringify(payload, null, 2);
         state.channels = extractItems(payload);
         hydrateChannels();
+        resetRiskScan('渠道列表已更新，点击“开始自动筛查”生成风险名单。');
 
         const count = state.channels.length;
         state.lastFetch = { source: 'online', type: 'channels', count, at: new Date().toISOString() };
-        setFetchStatus(`已拉取 ${fmtInt(count)} 个渠道。请选择渠道后点击“分析当前渠道”。`, 'ok');
+        setFetchStatus(`已拉取 ${fmtInt(count)} 个渠道。可以分析当前渠道，或在页面顶部开始自动筛查。`, 'ok');
         return state.channels;
       } catch (error) {
         setFetchStatus(`渠道拉取失败：${formatFetchError(error)}`, 'error');
@@ -1377,28 +1537,22 @@
       }
     }
 
-    async function fetchLogsOnline(channelId) {
-      const selected = getSelectedChannel();
-      const finalChannelId = channelId ?? selected?.id;
-      if (finalChannelId == null || finalChannelId === '') {
-        throw new Error('请先拉取渠道列表并选择一个渠道。');
-      }
-
+    async function fetchLogDataset(channelId, progressLabel = '日志') {
       const pageSize = LOG_PAGE_SIZE;
       const start = toUnixSecondFromDate($('start-date').value, false);
       const end = toUnixSecondFromDate($('end-date').value, true);
       const modelName = $('model-filter').value.trim();
       const allItems = [];
-      setFetchStatus('正在拉取日志：第 1 页...');
+      setFetchStatus(`正在拉取${progressLabel}：第 1 页...`);
       const firstPayload = await requestJsonWithRetry('/api/log/', {
         p: 1,
         page_size: pageSize,
         type: 0,
-        channel: finalChannelId,
+        channel: channelId,
         start_timestamp: start,
         end_timestamp: end,
         model_name: modelName,
-      }, '日志第 1 页');
+      }, `${progressLabel}第 1 页`);
       const firstItems = extractItems(firstPayload);
       const total = Number(firstPayload?.data?.total ?? firstPayload?.total);
 
@@ -1416,11 +1570,11 @@
             p: page,
             page_size: pageSize,
             type: 0,
-            channel: finalChannelId,
+            channel: channelId,
             start_timestamp: start,
             end_timestamp: end,
             model_name: modelName,
-          }, `日志第 ${page} 页`);
+          }, `${progressLabel}第 ${page} 页`);
         }
 
         async function fetchLogWorker() {
@@ -1429,7 +1583,7 @@
             const payload = await fetchLogPage(page);
             pageItems.set(page, extractItems(payload));
             completedPages += 1;
-            setFetchStatus(`正在拉取日志：已完成 ${completedPages}/${totalPages} 页...`);
+            setFetchStatus(`正在拉取${progressLabel}：已完成 ${completedPages}/${totalPages} 页...`);
           }
         }
 
@@ -1441,13 +1595,30 @@
         allItems.push(...firstItems);
       }
 
+      return {
+        items: allItems,
+        total: Number.isFinite(total) ? total : allItems.length,
+        totalPages,
+      };
+    }
+
+    async function fetchLogsOnline(channelId) {
+      const selected = getSelectedChannel();
+      const finalChannelId = channelId ?? selected?.id;
+      if (finalChannelId == null || finalChannelId === '') {
+        throw new Error('请先拉取渠道列表并选择一个渠道。');
+      }
+
+      const dataset = await fetchLogDataset(finalChannelId, '日志');
+      const allItems = dataset.items;
+
       const combined = {
         success: true,
         message: '',
         data: {
           page: 1,
-          page_size: pageSize,
-          total: Number.isFinite(total) ? total : allItems.length,
+          page_size: LOG_PAGE_SIZE,
+          total: dataset.total,
           items: allItems,
         },
       };
@@ -1478,6 +1649,146 @@
       } catch (error) {
         setFetchStatus(`拉取或分析失败：${formatFetchError(error)}`, 'error');
       }
+    }
+
+    function setRiskScanControls() {
+      const button = $('scan-risk-channels');
+      button.disabled = state.riskScanRunning || !state.channels.length;
+      button.textContent = state.riskScanRunning ? '正在自动筛查...' : '开始自动筛查';
+      for (const id of ['fetch-channels', 'run-analysis', 'start-date', 'end-date', 'analysis-mode', 'model-filter']) {
+        $(id).disabled = state.riskScanRunning;
+      }
+    }
+
+    function resetRiskScan(message = '先拉取渠道列表，再开始自动筛查。') {
+      state.riskScanResults = [];
+      state.riskScanCache = new Map();
+      $('risk-scanned-count').textContent = '0';
+      $('risk-replace-count').textContent = '0';
+      $('risk-pause-count').textContent = '0';
+      $('risk-log-count').textContent = '0';
+      $('risk-results').innerHTML = `<div class="empty">${escapeHtml(message)}</div>`;
+      setRiskScanControls();
+    }
+
+    function renderRiskScanResults(results, scannedCount, logCount) {
+      const replaceCount = results.filter((item) => item.metrics.recommendation.label === '建议更换渠道').length;
+      const pauseCount = results.filter((item) => item.metrics.recommendation.label === '暂不续费').length;
+      $('risk-scanned-count').textContent = fmtInt(scannedCount);
+      $('risk-replace-count').textContent = fmtInt(replaceCount);
+      $('risk-pause-count').textContent = fmtInt(pauseCount);
+      $('risk-log-count').textContent = fmtInt(logCount);
+
+      if (!results.length) {
+        $('risk-results').innerHTML = '<div class="empty">当前范围内没有发现“暂不续费”或“建议更换渠道”的渠道。</div>';
+        return;
+      }
+
+      const rows = results.map(({ channel, metrics }) => `
+        <tr>
+          <td>
+            <button class="risk-channel-button" type="button" data-risk-channel-id="${escapeHtml(channel.id)}">
+              ${escapeHtml(channel.name || `渠道 ${channel.id}`)}
+            </button>
+            <div class="footnote">#${escapeHtml(channel.id)}</div>
+          </td>
+          <td><span class="pill ${metrics.recommendation.tone}">${escapeHtml(metrics.recommendation.label)}</span></td>
+          <td>${fmtInt(metrics.overallScore)}</td>
+          <td>${fmtPercent(metrics.successRate)}</td>
+          <td>${fmtPercent(metrics.errorRate)}</td>
+          <td>${fmtMs(metrics.avgLatency)}<div class="footnote">P95 ${fmtMs(metrics.p95Latency)}</div></td>
+          <td class="risk-reason">${escapeHtml(metrics.recommendation.short)}</td>
+        </tr>
+      `).join('');
+
+      $('risk-results').innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>渠道</th>
+                <th>建议</th>
+                <th>得分</th>
+                <th>成功率</th>
+                <th>错误率</th>
+                <th>响应时间</th>
+                <th>主要原因</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    async function scanRiskChannels() {
+      if (state.riskScanRunning) return;
+      if (!state.channels.length) {
+        setFetchStatus('请先点击“拉取渠道”，再开始自动筛查。', 'error');
+        return;
+      }
+
+      state.riskScanRunning = true;
+      setRiskScanControls();
+      resetRiskScan('正在拉取当前范围内的全渠道日志...');
+
+      try {
+        const filter = getAnalysisFilter();
+        const dataset = await fetchLogDataset(null, '全渠道日志');
+        const logsByChannel = new Map();
+        for (const log of dataset.items) {
+          const channelId = getLogChannelId(log);
+          if (channelId == null || channelId === '') continue;
+          const key = String(channelId);
+          if (!logsByChannel.has(key)) logsByChannel.set(key, []);
+          logsByChannel.get(key).push(log);
+        }
+
+        const allResults = state.channels.map((channel) => {
+          const channelLogs = logsByChannel.get(String(channel.id)) || [];
+          const filteredLogs = filterLogsForAnalysis(channelLogs, channel.id, filter);
+          const metrics = analyzeChannel(channel, filteredLogs);
+          state.riskScanCache.set(String(channel.id), { channel, logs: channelLogs, metrics });
+          return { channel, metrics };
+        });
+
+        const riskLabels = new Set(['暂不续费', '建议更换渠道']);
+        const priority = { '建议更换渠道': 0, '暂不续费': 1 };
+        state.riskScanResults = allResults
+          .filter((item) => riskLabels.has(item.metrics.recommendation.label))
+          .sort((a, b) => {
+            const recommendationOrder = priority[a.metrics.recommendation.label] - priority[b.metrics.recommendation.label];
+            if (recommendationOrder !== 0) return recommendationOrder;
+            return a.metrics.overallScore - b.metrics.overallScore;
+          });
+
+        renderRiskScanResults(state.riskScanResults, state.channels.length, dataset.items.length);
+        setFetchStatus(`自动筛查完成：扫描 ${fmtInt(state.channels.length)} 个渠道，发现 ${fmtInt(state.riskScanResults.length)} 个不建议续费渠道。`, 'ok');
+      } catch (error) {
+        resetRiskScan(`自动筛查失败：${formatFetchError(error)}`);
+        setFetchStatus(`自动筛查失败：${formatFetchError(error)}`, 'error');
+      } finally {
+        state.riskScanRunning = false;
+        setRiskScanControls();
+      }
+    }
+
+    function showRiskChannel(channelId) {
+      const cached = state.riskScanCache.get(String(channelId));
+      if (!cached) return;
+
+      $('channel-filter').value = '';
+      state.selectedChannelId = String(channelId);
+      renderChannelOptions(channelId);
+      state.logs = cached.logs;
+      $('log-json').value = JSON.stringify({
+        success: true,
+        message: '',
+        data: { page: 1, page_size: LOG_PAGE_SIZE, total: cached.logs.length, items: cached.logs },
+      }, null, 2);
+      renderAll(cached.channel, cached.metrics);
+      setFetchStatus(`已打开自动筛查结果：${cached.channel.name || `渠道 ${cached.channel.id}`}。`, 'ok');
+      $('status-grid').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 
     function safeJsonParse(text) {
@@ -1784,6 +2095,7 @@
         state.channels = [];
       }
       renderChannelOptions(state.selectedChannelId);
+      setRiskScanControls();
     }
 
     function getSelectedChannel() {
@@ -1791,21 +2103,35 @@
       return state.channels.find((channel) => String(channel.id) === String(id)) || state.channels[0] || null;
     }
 
-    function getFilteredLogs(channelId) {
-      const startTs = readDateValue($('start-date').value);
-      const endTs = readDateValue($('end-date').value);
-      const mode = $('analysis-mode').value;
-      state.analysisMode = mode;
+    function getLogChannelId(log) {
+      return log.channel ?? log.channel_id ?? log.channelId;
+    }
 
-      return state.logs.filter((log) => {
+    function getAnalysisFilter() {
+      return {
+        startTs: readDateValue($('start-date').value),
+        endTs: readDateValue($('end-date').value),
+        mode: $('analysis-mode').value,
+      };
+    }
+
+    function filterLogsForAnalysis(logs, channelId, filter = getAnalysisFilter()) {
+      const { startTs, endTs, mode } = filter;
+      return logs.filter((log) => {
         const timestamp = getTimestamp(log);
         if (startTs != null && timestamp != null && timestamp < startTs) return false;
         if (endTs != null && timestamp != null && timestamp >= endTs + 24 * 3600 * 1000) return false;
-        if (String(log.channel ?? '') !== String(channelId)) return false;
+        if (String(getLogChannelId(log) ?? '') !== String(channelId)) return false;
         if (mode === 'all') return true;
         const { requestSignal } = classifyLog(log);
         return requestSignal;
       });
+    }
+
+    function getFilteredLogs(channelId) {
+      const filter = getAnalysisFilter();
+      state.analysisMode = filter.mode;
+      return filterLogsForAnalysis(state.logs, channelId, filter);
     }
 
     function analyze() {
@@ -2570,18 +2896,22 @@
     });
 
     $('analysis-mode').addEventListener('change', () => {
+      resetRiskScan('分析口径已变化，请重新开始自动筛查。');
       setFetchStatus('分析口径已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
     $('start-date').addEventListener('change', () => {
+      resetRiskScan('日期范围已变化，请重新开始自动筛查。');
       setFetchStatus('开始日期已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
     $('end-date').addEventListener('change', () => {
+      resetRiskScan('日期范围已变化，请重新开始自动筛查。');
       setFetchStatus('结束日期已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
     $('model-filter').addEventListener('change', () => {
+      resetRiskScan('模型筛选已变化，请重新开始自动筛查。');
       setFetchStatus('模型筛选已变更。需要更新结果时，请点击“分析当前渠道”或使用备用 JSON 分析。');
     });
 
@@ -2593,6 +2923,18 @@
       }
     });
     $('run-analysis').addEventListener('click', () => fetchAndAnalyzeOnline());
+    $('scan-risk-channels').addEventListener('click', scanRiskChannels);
+    $('risk-results').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-risk-channel-id]');
+      if (button) showRiskChannel(button.dataset.riskChannelId);
+    });
+    for (const id of ['base-url', 'api-user', 'proxy-url', 'cookie-header', 'fetch-mode']) {
+      $(id).addEventListener('change', saveConnectionConfig);
+    }
+    $('remember-connection').addEventListener('change', () => {
+      if ($('remember-connection').checked) saveConnectionConfig();
+      else clearSavedConnectionConfig();
+    });
     $('load-demo').addEventListener('click', setDemoData);
     $('analyze-manual').addEventListener('click', () => {
       state.lastFetch = { source: 'manual', type: 'manual', at: new Date().toISOString() };
@@ -2602,13 +2944,15 @@
 
     $('clear-all').addEventListener('click', () => {
       $('base-url').value = 'https://maolaoapi.com';
-      $('api-user').value = '';
+      $('api-user').value = DEFAULT_API_USER;
       $('cookie-header').value = '';
       $('channel-page-size').value = '100';
       $('channel-filter').value = '';
       $('model-filter').value = '';
       $('fetch-mode').value = getDefaultFetchMode();
       $('proxy-url').value = getDefaultProxyUrl();
+      $('remember-connection').checked = true;
+      clearSavedConnectionConfig();
       $('channel-json').value = '';
       $('log-json').value = '';
       $('channel-select').innerHTML = '<option value="">暂无渠道</option>';
@@ -2618,6 +2962,8 @@
       state.logs = [];
       state.selectedChannelId = null;
       state.lastFetch = null;
+      state.riskScanRunning = false;
+      resetRiskScan();
       setFetchStatus('等待拉取。');
       renderEmpty();
       renderChannelOptions();
@@ -2650,13 +2996,17 @@
     $('channel-json').addEventListener('input', () => {
       state.lastFetch = { source: 'manual', type: 'channel-input', at: new Date().toISOString() };
       hydrateChannels();
+      resetRiskScan('渠道数据已变化，请重新开始自动筛查。');
     });
 
     renderEmpty();
     renderChannelOptions();
     $('fetch-mode').value = getDefaultFetchMode();
     $('proxy-url').value = getDefaultProxyUrl();
+    $('api-user').value = DEFAULT_API_USER;
+    restoreConnectionConfig();
     setDefaultDateRange();
+    resetRiskScan();
     setFetchStatus('等待拉取。');
   </script>
 </body>
