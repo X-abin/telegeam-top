@@ -502,6 +502,7 @@ def main():
         'id_sort': 'false',
         'tag_mode': 'false',
     }, 'channels')
+    channels = [channel for channel in channels if integer(channel.get('status')) == 1]
     pending_channels = queue.Queue()
     for channel in channels:
         pending_channels.put(channel)

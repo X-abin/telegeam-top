@@ -1228,6 +1228,10 @@
       return `${channel.name ?? `渠道 ${channel.id}`} (#${channel.id}, ${status})`;
     }
 
+    function isEnabledChannel(channel) {
+      return Number(channel?.status) === 1;
+    }
+
     function getChannelSortName(channel) {
       return String(channel.name ?? `渠道 ${channel.id}`);
     }
@@ -1345,16 +1349,19 @@
     }
 
     function renderDailyReport(report) {
-      const summary = report?.summary || {};
-      const channels = Array.isArray(report?.channels) ? report.channels : [];
+      const channels = Array.isArray(report?.channels) ? report.channels.filter(isEnabledChannel) : [];
+      const requestCount = channels.reduce((sum, channel) => sum + (reportNumber(channel.request_count) || 0), 0);
+      const successCount = channels.reduce((sum, channel) => sum + (reportNumber(channel.success_count) || 0), 0);
+      const replaceCount = channels.filter((channel) => channel.recommendation === '建议更换渠道').length;
+      const pauseCount = channels.filter((channel) => channel.recommendation === '暂不续费').length;
       $('daily-report-date').textContent = report?.report_date || '--';
-      $('daily-channel-count').textContent = fmtInt(reportNumber(summary.channel_count));
-      $('daily-request-count').textContent = fmtInt(reportNumber(summary.request_count));
-      $('daily-success-rate').textContent = fmtPercent(reportNumber(summary.success_rate));
-      $('daily-replace-count').textContent = fmtInt(reportNumber(summary.replace_count));
-      $('daily-pause-count').textContent = fmtInt(reportNumber(summary.pause_count));
+      $('daily-channel-count').textContent = fmtInt(channels.length);
+      $('daily-request-count').textContent = fmtInt(requestCount);
+      $('daily-success-rate').textContent = fmtPercent(requestCount > 0 ? successCount / requestCount : NaN);
+      $('daily-replace-count').textContent = fmtInt(replaceCount);
+      $('daily-pause-count').textContent = fmtInt(pauseCount);
       $('daily-report-meta').textContent = report?.generated_at
-        ? `统计日期 ${report.report_date}，生成时间 ${String(report.generated_at).replace('T', ' ')}；请求量为精确值，延迟与额度为样本统计。`
+        ? `统计日期 ${report.report_date}，生成时间 ${String(report.generated_at).replace('T', ' ')}；已隐藏停用渠道，请求量为精确值，延迟与额度为样本统计。`
         : '每天北京时间 00:00 自动统计；请求量为精确值，延迟与额度基于每渠道样本。';
 
       if (!channels.length) {
@@ -1657,13 +1664,15 @@
         }, '渠道列表');
 
         $('channel-json').value = JSON.stringify(payload, null, 2);
-        state.channels = extractItems(payload);
+        const allChannels = extractItems(payload);
+        state.channels = allChannels;
         hydrateChannels();
         resetRiskScan('渠道列表已更新，点击“开始自动筛查”生成风险名单。');
 
         const count = state.channels.length;
+        const hiddenCount = Math.max(0, allChannels.length - count);
         state.lastFetch = { source: 'online', type: 'channels', count, at: new Date().toISOString() };
-        setFetchStatus(`已拉取 ${fmtInt(count)} 个渠道。可以分析当前渠道，或在页面顶部开始自动筛查。`, 'ok');
+        setFetchStatus(`已拉取 ${fmtInt(count)} 个启用渠道，隐藏 ${fmtInt(hiddenCount)} 个停用渠道。可以分析当前渠道，或在页面顶部开始自动筛查。`, 'ok');
         return state.channels;
       } catch (error) {
         setFetchStatus(`渠道拉取失败：${formatFetchError(error)}`, 'error');
@@ -2298,7 +2307,7 @@
 
     function hydrateChannels() {
       try {
-        state.channels = sortChannels(readEndpointPayload($('channel-json').value));
+        state.channels = sortChannels(readEndpointPayload($('channel-json').value).filter(isEnabledChannel));
       } catch {
         state.channels = [];
       }
