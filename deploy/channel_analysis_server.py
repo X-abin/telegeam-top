@@ -28,7 +28,7 @@ def response_headers(extra=None):
     headers = {
         'Cache-Control': 'no-store',
         'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
         'Access-Control-Allow-Headers': 'Content-Type, Accept',
     }
     if extra:
@@ -67,6 +67,17 @@ class ChannelAnalysisHandler(BaseHTTPRequestHandler):
         parsed = urlparse.urlparse(self.path)
         if parsed.path == '/healthz':
             return self.send_json(200, {'ok': True})
+        if parsed.path == '/daily/latest.json':
+            report_path = os.path.join(ROOT, 'daily', 'latest.json')
+            try:
+                with open(report_path, 'rb') as handle:
+                    content = handle.read()
+            except IOError:
+                return self.send_json(404, {'success': False, 'message': 'Daily report is not ready.'})
+            return self.send_bytes(200, content, {
+                'Content-Type': 'application/json; charset=utf-8',
+                'Cache-Control': 'no-cache',
+            })
         if parsed.path not in ('/', '/index.html'):
             return self.send_json(404, {'success': False, 'message': 'Not found.'})
 

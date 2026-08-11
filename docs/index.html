@@ -225,6 +225,27 @@
       border-color: color-mix(in srgb, var(--orange) 28%, var(--line));
     }
 
+    .daily-panel {
+      margin-bottom: 20px;
+      padding: 0;
+      overflow: hidden;
+      border-color: color-mix(in srgb, var(--blue) 26%, var(--line));
+    }
+
+    .daily-panel .panel-head {
+      margin: 0;
+      padding: 20px 22px;
+      background: color-mix(in srgb, var(--blue-soft) 54%, var(--surface));
+    }
+
+    .daily-results {
+      padding: 16px 22px 20px;
+    }
+
+    .daily-results .table-wrap {
+      border-radius: 8px;
+    }
+
     .risk-panel .panel-head {
       margin: 0;
       padding: 20px 22px;
@@ -900,6 +921,29 @@
       </div>
     </section>
 
+    <section class="panel daily-panel" id="daily-panel">
+      <div class="panel-head">
+        <div>
+          <h2>昨日渠道效果日报</h2>
+          <p class="footnote" id="daily-report-meta">每天北京时间 00:00 自动统计前一天全部渠道。</p>
+        </div>
+        <div class="actions">
+          <button class="btn" id="refresh-daily-report" type="button">刷新日报</button>
+        </div>
+      </div>
+      <div class="risk-summary" aria-live="polite">
+        <div class="risk-summary-item"><span>报告日期</span><strong id="daily-report-date">--</strong></div>
+        <div class="risk-summary-item"><span>渠道数</span><strong id="daily-channel-count">0</strong></div>
+        <div class="risk-summary-item"><span>有效请求</span><strong id="daily-request-count">0</strong></div>
+        <div class="risk-summary-item"><span>整体成功率</span><strong id="daily-success-rate">--</strong></div>
+        <div class="risk-summary-item"><span>建议更换</span><strong id="daily-replace-count">0</strong></div>
+        <div class="risk-summary-item"><span>暂不续费</span><strong id="daily-pause-count">0</strong></div>
+      </div>
+      <div class="daily-results" id="daily-results">
+        <div class="empty">正在读取最新日报...</div>
+      </div>
+    </section>
+
     <section class="panel risk-panel" id="risk-panel">
       <div class="panel-head">
         <div>
@@ -1131,6 +1175,7 @@
 
     const DEFAULT_API_USER = '5229';
     const DEFAULT_PROXY_URL = 'https://bin.nu11.me/proxy';
+    const DAILY_REPORT_URL = 'https://bin.nu11.me/daily/latest.json';
     const CONNECTION_STORAGE_KEY = 'channel-renewal-analysis.connection.v1';
 
     const errorKeywords = [
@@ -1293,6 +1338,91 @@
       node.textContent = message;
       node.classList.remove('is-ok', 'is-error');
       if (tone) node.classList.add(tone === 'error' ? 'is-error' : 'is-ok');
+    }
+
+    function reportNumber(value) {
+      return value == null || value === '' ? NaN : Number(value);
+    }
+
+    function renderDailyReport(report) {
+      const summary = report?.summary || {};
+      const channels = Array.isArray(report?.channels) ? report.channels : [];
+      $('daily-report-date').textContent = report?.report_date || '--';
+      $('daily-channel-count').textContent = fmtInt(reportNumber(summary.channel_count));
+      $('daily-request-count').textContent = fmtInt(reportNumber(summary.request_count));
+      $('daily-success-rate').textContent = fmtPercent(reportNumber(summary.success_rate));
+      $('daily-replace-count').textContent = fmtInt(reportNumber(summary.replace_count));
+      $('daily-pause-count').textContent = fmtInt(reportNumber(summary.pause_count));
+      $('daily-report-meta').textContent = report?.generated_at
+        ? `统计日期 ${report.report_date}，生成时间 ${String(report.generated_at).replace('T', ' ')}`
+        : '每天北京时间 00:00 自动统计前一天全部渠道。';
+
+      if (!channels.length) {
+        $('daily-results').innerHTML = '<div class="empty">该日报没有可展示的渠道数据。</div>';
+        return;
+      }
+
+      const rows = channels.map((channel) => {
+        const topModel = Array.isArray(channel.top_models) && channel.top_models.length
+          ? `${channel.top_models[0].model} (${fmtInt(reportNumber(channel.top_models[0].count))})`
+          : '--';
+        const topError = Array.isArray(channel.error_reasons) && channel.error_reasons.length
+          ? `${channel.error_reasons[0].reason} ${fmtInt(reportNumber(channel.error_reasons[0].count))}`
+          : '无集中错误';
+        return `
+          <tr>
+            <td><strong>${escapeHtml(channel.name || `渠道 ${channel.id}`)}</strong><div class="footnote">#${escapeHtml(channel.id)}</div></td>
+            <td><span class="pill ${escapeHtml(channel.tone || '')}">${escapeHtml(channel.recommendation || '--')}</span></td>
+            <td>${fmtFloat(reportNumber(channel.score), 1)}</td>
+            <td>${fmtInt(reportNumber(channel.request_count))}</td>
+            <td>${fmtPercent(reportNumber(channel.success_rate))}</td>
+            <td>${fmtPercent(reportNumber(channel.error_rate))}</td>
+            <td>${fmtMs(reportNumber(channel.avg_latency))}<div class="footnote">P95 ${fmtMs(reportNumber(channel.p95_latency))}</div></td>
+            <td>${fmtQuota(reportNumber(channel.total_quota))}</td>
+            <td>${escapeHtml(topModel)}</td>
+            <td class="risk-reason">${escapeHtml(topError)}<div class="footnote">${escapeHtml(channel.short || '')}</div></td>
+          </tr>
+        `;
+      }).join('');
+
+      $('daily-results').innerHTML = `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>渠道</th>
+                <th>建议</th>
+                <th>得分</th>
+                <th>请求量</th>
+                <th>成功率</th>
+                <th>错误率</th>
+                <th>响应时间</th>
+                <th>额度消耗</th>
+                <th>主要模型</th>
+                <th>异常与结论</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    async function loadDailyReport() {
+      const button = $('refresh-daily-report');
+      button.disabled = true;
+      button.textContent = '正在刷新...';
+      try {
+        const response = await fetch(DAILY_REPORT_URL, { cache: 'no-store', credentials: 'omit' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        renderDailyReport(await response.json());
+      } catch (error) {
+        $('daily-report-meta').textContent = '每天北京时间 00:00 自动统计前一天全部渠道。';
+        $('daily-results').innerHTML = `<div class="empty">最新日报暂不可用：${escapeHtml(error?.message || String(error))}</div>`;
+      } finally {
+        button.disabled = false;
+        button.textContent = '刷新日报';
+      }
     }
 
     function parseWorkflowHeaders(rawCookie, rawApiUser) {
@@ -3002,6 +3132,7 @@
     });
     $('run-analysis').addEventListener('click', () => fetchAndAnalyzeOnline());
     $('scan-risk-channels').addEventListener('click', scanRiskChannels);
+    $('refresh-daily-report').addEventListener('click', loadDailyReport);
     $('risk-results').addEventListener('click', (event) => {
       const button = event.target.closest('[data-risk-channel-id]');
       if (button) showRiskChannel(button.dataset.riskChannelId);
@@ -3090,6 +3221,7 @@
     setDefaultDateRange();
     resetRiskScan();
     setFetchStatus('等待拉取。');
+    loadDailyReport();
   </script>
 </body>
 </html>
